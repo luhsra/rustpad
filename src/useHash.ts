@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const idLen = 6;
+const idLen = 12;
 
 function getHash() {
   if (!window.location.hash) {
