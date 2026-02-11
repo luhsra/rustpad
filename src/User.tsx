@@ -34,14 +34,11 @@ function UserMe({
   onChangeName,
   onChangeColor,
 }: UserProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
 
   return (
-    <Popover.Root
-      placement="right"
-      initialFocusRef={inputRef}
-    >
+    <Popover.Root initialFocusEl={() => inputRef.current}>
       <Popover.Trigger asChild>
         <Button variant="outline" size="xs">
           <Icon as={VscAccount} />

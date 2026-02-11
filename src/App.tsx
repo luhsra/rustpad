@@ -1,6 +1,6 @@
-import { Box, Dialog, Flex, Portal, Text } from "@chakra-ui/react";
+import { Flex, Portal, Text } from "@chakra-ui/react";
 import Editor from "@monaco-editor/react";
-import { editor } from "monaco-editor/esm/vs/editor/editor.api";
+import { editor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import useLocalStorageState from "use-local-storage-state";
 import { Toaster, toaster } from "./toaster";
@@ -78,7 +78,7 @@ function App() {
           toaster.create({
             title: "Desynchronized with server",
             description: "Please save your work and refresh the page.",
-            status: "error",
+            type: "error",
             duration: null,
           });
         },
@@ -116,9 +116,9 @@ function App() {
             .
           </>
         ),
-        status: "info",
+        type: "info",
         duration: 2000,
-        isClosable: true,
+        closable: true,
       });
     }
   }

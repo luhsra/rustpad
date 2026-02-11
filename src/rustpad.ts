@@ -3,7 +3,7 @@ import type {
   IDisposable,
   IPosition,
   editor,
-} from "monaco-editor/esm/vs/editor/editor.api";
+} from "monaco-editor";
 import { OpSeq } from "rustpad-wasm";
 
 /** Options passed in to the Rustpad constructor. */
