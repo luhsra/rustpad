@@ -43,7 +43,7 @@
               lldb
               openssl
               wasm-pack
-              nodejs
+              bun
             ];
           env = {
             # Rust-analyzer

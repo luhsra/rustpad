@@ -33,7 +33,7 @@ after 24 hours of inactivity.
 
 ## Development setup
 
-To run this application, you need to install Rust, `wasm-pack`, and Node.js.
+To run this application, you need to install Rust, `wasm-pack`, and `bun`.
 Then, build the WebAssembly portion of the app:
 
 ```
@@ -44,7 +44,7 @@ When that is complete, you can install dependencies for the frontend React
 application:
 
 ```
-npm install
+bun install
 ```
 
 Next, compile and run the backend web server:
@@ -57,7 +57,7 @@ While the backend is running, open another shell and run the following command
 to start the frontend portion.
 
 ```
-npm run dev
+bun run dev
 ```
 
 This command will open a browser window to `http://localhost:5173`, with hot
