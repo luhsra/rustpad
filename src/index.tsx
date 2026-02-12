@@ -4,8 +4,8 @@ import { createRoot } from "react-dom/client";
 import * as wasm from "rustpad-wasm";
 
 import App from "./App";
-import "./index.css";
 import { ColorModeProvider } from "./color-mode";
+import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

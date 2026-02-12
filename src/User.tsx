@@ -24,16 +24,14 @@ export function User({ info }: UserProps) {
   return (
     <HStack gap={2}>
       <Icon as={VscAccount} color={nameColor} />
-      <Text fontWeight="semibold" color={nameColor}>{info.name}</Text>
+      <Text fontWeight="semibold" color={nameColor}>
+        {info.name}
+      </Text>
     </HStack>
   );
 }
 
-function UserMe({
-  info,
-  onChangeName,
-  onChangeColor,
-}: UserProps) {
+function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
 
@@ -42,7 +40,9 @@ function UserMe({
       <Popover.Trigger asChild>
         <Button variant="outline" size="xs">
           <Icon as={VscAccount} />
-          <Text fontWeight="semibold" color={nameColor}>{info.name}</Text>
+          <Text fontWeight="semibold" color={nameColor}>
+            {info.name}
+          </Text>
         </Button>
       </Popover.Trigger>
       <Portal>
@@ -50,9 +50,7 @@ function UserMe({
           <Popover.Content>
             <Popover.Arrow />
             <Popover.Body>
-              <Popover.Title fontWeight="semibold">
-                Update Info
-              </Popover.Title>
+              <Popover.Title fontWeight="semibold">Update Info</Popover.Title>
               <Input
                 ref={inputRef}
                 mb={2}

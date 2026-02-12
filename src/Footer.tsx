@@ -1,10 +1,20 @@
-import { Box, Button, CloseButton, Dialog, Flex, Icon, NativeSelect, Popover, Portal, Text } from "@chakra-ui/react";
-import { VscOrganization } from "react-icons/vsc";
-import { type UserInfo } from "./rustpad";
-import UserMe, { User } from "./User";
-
+import {
+  Box,
+  Button,
+  CloseButton,
+  Dialog,
+  Flex,
+  Icon,
+  NativeSelect,
+  Popover,
+  Portal,
+  Text,
+} from "@chakra-ui/react";
 import { languages } from "monaco-editor";
+import { VscOrganization } from "react-icons/vsc";
 
+import UserMe, { User } from "./User";
+import { type UserInfo } from "./rustpad";
 
 export type FooterProps = {
   language: string;
@@ -26,13 +36,19 @@ function Footer({
   onChangeColor,
 }: FooterProps) {
   // All supported languages, excluding some specific variants
-  let lang = languages.getLanguages().map(it => it.id).filter(it => !it.includes("."))
+  let lang = languages
+    .getLanguages()
+    .map((it) => it.id)
+    .filter((it) => !it.includes("."));
 
   return (
     <Flex bgColor="#0071c3" color="white" gap={2}>
       <Box>
         <NativeSelect.Root size="xs">
-          <NativeSelect.Field value={language} onChange={(event) => onLanguageChange(event.target.value)}>
+          <NativeSelect.Field
+            value={language}
+            onChange={(event) => onLanguageChange(event.target.value)}
+          >
             {lang.map((lang) => (
               <option key={lang} value={lang} style={{ color: "black" }}>
                 {lang}
@@ -45,7 +61,9 @@ function Footer({
 
       <Dialog.Root>
         <Dialog.Trigger asChild>
-          <Button variant="outline" size="xs">Sample</Button>
+          <Button variant="outline" size="xs">
+            Sample
+          </Button>
         </Dialog.Trigger>
         <Portal>
           <Dialog.Backdrop />
@@ -65,7 +83,9 @@ function Footer({
                   <Button variant="outline">Cancel</Button>
                 </Dialog.ActionTrigger>
                 <Dialog.ActionTrigger asChild>
-                  <Button onClick={onLoadSample} colorPalette="red">Load Sample</Button>
+                  <Button onClick={onLoadSample} colorPalette="red">
+                    Load Sample
+                  </Button>
                 </Dialog.ActionTrigger>
               </Dialog.Footer>
             </Dialog.Content>
@@ -87,7 +107,9 @@ function Footer({
               <Popover.Arrow />
               <Popover.Body>
                 {Object.entries(users).map(([id, user]) => (
-                  <Box key={id}><User info={user} /></Box>
+                  <Box key={id}>
+                    <User info={user} />
+                  </Box>
                 ))}
               </Popover.Body>
             </Popover.Content>

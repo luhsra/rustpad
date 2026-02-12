@@ -1,5 +1,6 @@
 import { HStack, Icon, Text } from "@chakra-ui/react";
 import { VscCircleFilled } from "react-icons/vsc";
+
 import { type ConnectionState } from "./App";
 
 type ConnectionStatusProps = {
@@ -19,10 +20,7 @@ function ConnectionStatus({ connection }: ConnectionStatusProps) {
           }[connection]
         }
       />
-      <Text
-        fontSize="sm"
-        fontStyle="italic"
-      >
+      <Text fontSize="sm" fontStyle="italic">
         {
           {
             connected: "Connected!",

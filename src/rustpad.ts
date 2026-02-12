@@ -163,7 +163,7 @@ class Rustpad {
         return;
       }
       for (let i = this.revision - start; i < operations.length; i++) {
-        let { id, operation } = operations[i];
+        let { id, operation } = operations[i]!;
         this.revision++;
         if (id === this.me) {
           this.serverAck();
@@ -328,7 +328,7 @@ class Rustpad {
 
     for (const [id, data] of Object.entries(this.userCursors)) {
       if (id in this.users) {
-        const { hue, name } = this.users[id as any];
+        const { hue, name } = this.users[id as any]!;
         generateCssStyles(hue);
 
         for (const cursor of data.cursors) {
