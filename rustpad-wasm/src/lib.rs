@@ -115,20 +115,17 @@ impl OpSeq {
     }
 
     /// Checks if this operation has no effect.
-    #[inline]
     pub fn is_noop(&self) -> bool {
         self.0.is_noop()
     }
 
     /// Returns the length of a string these operations can be applied to
-    #[inline]
     pub fn base_len(&self) -> usize {
         self.0.base_len()
     }
 
     /// Returns the length of the resulting string after the operations have
     /// been applied.
-    #[inline]
     pub fn target_len(&self) -> usize {
         self.0.target_len()
     }
