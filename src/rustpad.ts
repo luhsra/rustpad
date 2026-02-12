@@ -1,6 +1,14 @@
 import debounce from "lodash.debounce";
 import type { IDisposable, IPosition, editor } from "monaco-editor";
-import { OpSeq } from "rustpad-wasm";
+import { OpSeq, initSync } from "rustpad-wasm/rustpad_wasm";
+
+// Bun cannot automatically bundle and init wasm modules, so we have to do it manually.
+// See: https://github.com/flowscripter/template-bun-wasm-rust-library
+import wasm from "rustpad-wasm/pkg/rustpad_wasm_bg.wasm";
+const wasmBuffer = typeof Bun !== "undefined"
+  ? await Bun.file(wasm as any).arrayBuffer()
+  : await fetch(wasm as any).then((response) => response.arrayBuffer());
+
 
 /** Options passed in to the Rustpad constructor. */
 export type RustpadOptions = {
@@ -49,6 +57,9 @@ class Rustpad {
   private oldDecorations: string[] = [];
 
   constructor(readonly options: RustpadOptions) {
+    // Initialize the Rust WASM module. This must be done before any `OpSeq` methods are called.
+    initSync(wasmBuffer);
+
     this.model = options.editor.getModel()!;
     this.onChangeHandle = options.editor.onDidChangeModelContent((e) =>
       this.onChange(e),
@@ -118,8 +129,10 @@ class Rustpad {
   private tryConnect() {
     if (this.connecting || this.ws) return;
     this.connecting = true;
+    console.info("connecting to", this.options.uri);
     const ws = new WebSocket(this.options.uri);
     ws.onopen = () => {
+      console.info("connected to", this.options.uri);
       this.connecting = false;
       this.ws = ws;
       this.options.onConnected?.();
@@ -133,6 +146,7 @@ class Rustpad {
     };
     ws.onclose = () => {
       if (this.ws) {
+        console.warn("disconnected from", this.options.uri);
         this.ws = undefined;
         this.options.onDisconnected?.();
         if (++this.recentFailures >= 5) {

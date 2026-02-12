@@ -136,6 +136,8 @@ fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
 async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl Reply, Rejection> {
     use dashmap::mapref::entry::Entry;
 
+    info!("socket connection for id = {}", id);
+
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {

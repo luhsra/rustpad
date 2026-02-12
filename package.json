@@ -4,10 +4,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bunx --bun vite",
+    "dev": "bun run server.ts",
     "check": "tsc",
-    "build": "bunx --bun vite build",
-    "serve": "bunx --bun vite preview",
+    "build": "bun run bundle.ts",
     "format": "prettier --write ."
   },
   "dependencies": {
@@ -24,17 +23,12 @@
   },
   "devDependencies": {
     "@trivago/prettier-plugin-sort-imports": "^6.0.2",
-    "@types/lodash.debounce": "^4.0.9",
     "@types/bun": "latest",
+    "@types/lodash.debounce": "^4.0.9",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.4",
     "monaco-editor": "^0.55.1",
     "prettier": "3.8.1",
-    "typescript": "~5.9.3",
-    "vite": "^7.3.1",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0",
-    "vite-tsconfig-paths": "^6.1.0"
+    "typescript": "~5.9.3"
   }
 }

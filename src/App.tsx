@@ -1,52 +1,26 @@
 import { Box, Flex, Portal, Text } from "@chakra-ui/react";
-// import Editor from "@monaco-editor/react";
 import { editor, languages } from "monaco-editor";
-import * as monaco from 'monaco-editor';
-import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 import { useEffect, useRef, useState } from "react";
 import useLocalStorageState from "use-local-storage-state";
 
-import rustpadRaw from "../README.md?raw";
+import "./monaco-config"; // Configure monaco before using it
+import readme from "../README.md";
 import Footer from "./Footer";
 import Header from "./Header";
 import animals from "./animals.json";
-import { useColorMode } from "./color-mode";
+import { useColorMode } from "./components/color-mode";
 import Rustpad, { type UserInfo } from "./rustpad";
-import { Toaster, toaster } from "./toaster";
+import { Toaster, toaster } from "./components/toaster";
 import useHash from "./useHash";
-import { Editor, loader } from "@monaco-editor/react";
-
-/// Configure web workers for vite
-self.MonacoEnvironment = {
-  getWorker(_, label) {
-    if (label === 'json') {
-      return new jsonWorker();
-    }
-    if (label === 'css' || label === 'scss' || label === 'less') {
-      return new cssWorker();
-    }
-    if (label === 'html' || label === 'handlebars' || label === 'razor') {
-      return new htmlWorker();
-    }
-    if (label === 'typescript' || label === 'javascript') {
-      return new tsWorker();
-    }
-    return new editorWorker();
-  },
-};
-/// Use bundle version of monaco editor
-loader.config({ monaco });
+import { Editor } from "@monaco-editor/react";
 
 export type ConnectionState = "connected" | "disconnected" | "desynchronized";
 
-const version =
-  typeof import.meta.env?.VITE_SHA === "string"
-    ? import.meta.env.VITE_SHA.slice(0, 7)
-    : "development";
+const sampleText = typeof Bun !== "undefined"
+  ? await Bun.file(readme as any).text()
+  : await fetch(readme as any).then((response) => response.text());
+
+const version = import.meta.env?.VERSION || "dev";
 
 function getWsUri(id: string) {
   let url = new URL(`api/socket/${id}`, window.location.href);
@@ -164,7 +138,7 @@ function App() {
 
       model.pushEditOperations(
         editor.getSelections(),
-        [{ range, text: rustpadRaw }],
+        [{ range, text: sampleText }],
         () => null,
       );
       editor.setPosition({ column: 0, lineNumber: 0 });

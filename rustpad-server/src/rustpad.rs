@@ -133,7 +133,7 @@ impl Rustpad {
     /// Handle a connection from a WebSocket.
     pub async fn on_connection(&self, socket: WebSocket) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
-        info!("connection! id = {}", id);
+        info!("connection id={id}");
         if let Err(e) = self.handle_connection(id, socket).await {
             warn!("connection terminated early: {}", e);
         }
