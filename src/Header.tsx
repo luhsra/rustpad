@@ -1,6 +1,6 @@
 import { Box, Flex, HStack, Icon, IconButton, Text } from "@chakra-ui/react";
 import ConnectionStatus from "./ConnectionStatus";
-import { ConnectionState } from "./App";
+import { type ConnectionState } from "./App";
 import { VscColorMode } from "react-icons/vsc";
 
 export type HeaderProps = {

@@ -1,6 +1,6 @@
 import { HStack, Icon, Text } from "@chakra-ui/react";
 import { VscCircleFilled } from "react-icons/vsc";
-import { ConnectionState } from "./App";
+import { type ConnectionState } from "./App";
 
 type ConnectionStatusProps = {
   connection: ConnectionState;

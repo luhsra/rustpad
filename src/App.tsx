@@ -1,4 +1,4 @@
-import { Flex, Portal, Text } from "@chakra-ui/react";
+import { Box, Flex, Portal, Text } from "@chakra-ui/react";
 import Editor from "@monaco-editor/react";
 import { editor } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
@@ -9,7 +9,7 @@ import rustpadRaw from "../README.md?raw";
 import Footer from "./Footer";
 import animals from "./animals.json";
 import languages from "./languages.json";
-import Rustpad, { UserInfo } from "./rustpad";
+import Rustpad, { type UserInfo } from "./rustpad";
 import useHash from "./useHash";
 import Header from "./Header";
 import { useColorMode } from "./color-mode";
@@ -17,7 +17,7 @@ import { useColorMode } from "./color-mode";
 export type ConnectionState = "connected" | "disconnected" | "desynchronized";
 
 const version =
-  typeof import.meta.env.VITE_SHA === "string"
+  typeof import.meta.env?.VITE_SHA === "string"
     ? import.meta.env.VITE_SHA.slice(0, 7)
     : "development";
 
@@ -79,7 +79,7 @@ function App() {
             title: "Desynchronized with server",
             description: "Please save your work and refresh the page.",
             type: "error",
-            duration: null,
+            duration: undefined,
           });
         },
         onChangeLanguage: (language) => {
@@ -143,7 +143,7 @@ function App() {
   return (
     <Flex direction="column" h="100vh" overflow="hidden">
       <Header toggleColorMode={toggleColorMode} version={version} connection={connection} />
-      <Flex flex="1 0" minH={0}>
+      <Box flex="1 0" minH={0}>
         <Editor
           theme={colorMode === "dark" ? "vs-dark" : "vs"}
           language={language}
@@ -153,7 +153,7 @@ function App() {
           }}
           onMount={(editor) => setEditor(editor)}
         />
-      </Flex>
+      </Box>
       <Footer
         language={language}
         currentUser={{ name, hue }}

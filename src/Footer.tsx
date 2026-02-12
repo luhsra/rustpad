@@ -1,10 +1,9 @@
-import { Box, Button, Dialog, Flex, Icon, NativeSelect, Popover, Portal } from "@chakra-ui/react";
+import { Box, Button, CloseButton, Dialog, Flex, Icon, NativeSelect, Popover, Portal, Text } from "@chakra-ui/react";
 import { VscOrganization } from "react-icons/vsc";
-import { UserInfo } from "./rustpad";
+import { type UserInfo } from "./rustpad";
 import UserMe, { User } from "./User";
 
-
-import languages from "./languages.json";
+import { languages } from "monaco-editor";
 
 
 export type FooterProps = {
@@ -26,12 +25,15 @@ function Footer({
   onChangeName,
   onChangeColor,
 }: FooterProps) {
+  // All supported languages, excluding some specific variants
+  let lang = languages.getLanguages().map(it => it.id).filter(it => !it.includes("."))
+
   return (
     <Flex bgColor="#0071c3" color="white" gap={2}>
       <Box>
         <NativeSelect.Root size="xs">
           <NativeSelect.Field value={language} onChange={(event) => onLanguageChange(event.target.value)}>
-            {languages.map((lang) => (
+            {lang.map((lang) => (
               <option key={lang} value={lang} style={{ color: "black" }}>
                 {lang}
               </option>
@@ -42,26 +44,28 @@ function Footer({
       </Box>
 
       <Dialog.Root>
-        <Dialog.Trigger>
+        <Dialog.Trigger asChild>
           <Button variant="outline" size="xs">Sample</Button>
         </Dialog.Trigger>
         <Portal>
           <Dialog.Backdrop />
           <Dialog.Positioner>
             <Dialog.Content>
-              <Dialog.CloseTrigger />
+              <Dialog.CloseTrigger asChild>
+                <CloseButton size="sm" />
+              </Dialog.CloseTrigger>
               <Dialog.Header>
                 <Dialog.Title>Load Sample</Dialog.Title>
               </Dialog.Header>
               <Dialog.Body>
-                Delete this document and load the sample?
+                <Text>Delete this document and load the sample?</Text>
               </Dialog.Body>
               <Dialog.Footer>
                 <Dialog.ActionTrigger asChild>
                   <Button variant="outline">Cancel</Button>
                 </Dialog.ActionTrigger>
                 <Dialog.ActionTrigger asChild>
-                  <Button onClick={onLoadSample}>Load Sample</Button>
+                  <Button onClick={onLoadSample} colorPalette="red">Load Sample</Button>
                 </Dialog.ActionTrigger>
               </Dialog.Footer>
             </Dialog.Content>
@@ -82,9 +86,6 @@ function Footer({
             <Popover.Content>
               <Popover.Arrow />
               <Popover.Body>
-                <Popover.Title fontWeight="semibold">
-                  Online Users
-                </Popover.Title>
                 {Object.entries(users).map(([id, user]) => (
                   <Box key={id}><User info={user} /></Box>
                 ))}
