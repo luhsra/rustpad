@@ -12,13 +12,14 @@ use serde_json::json;
 #[tokio::test]
 async fn test_unicode_length() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "unicode", "").await;
 
     let mut client = connect(&filter, "unicode").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("h🎉e🎉l👨‍👨‍👦‍👦lo");
@@ -77,13 +78,14 @@ async fn test_unicode_length() -> Result<()> {
 #[tokio::test]
 async fn test_multiple_operations() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "unicode", "").await;
 
     let mut client = connect(&filter, "unicode").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("🎉😍𒀇👨‍👨‍👦‍👦"); // Emoticons and Cuneiform
@@ -172,10 +174,11 @@ async fn test_multiple_operations() -> Result<()> {
 #[tokio::test]
 async fn test_unicode_cursors() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "unicode").await?;
     assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("🎉🎉🎉");
@@ -205,6 +208,7 @@ async fn test_unicode_cursors() -> Result<()> {
 
     let mut client2 = connect(&filter, "unicode").await?;
     assert_eq!(client2.recv().await?, json!({ "Identity": 1 }));
+    assert!(client2.recv().await?.get("Meta").is_some());
     client2.recv().await?;
     assert_eq!(client2.recv().await?, cursors_resp);
 
@@ -218,6 +222,7 @@ async fn test_unicode_cursors() -> Result<()> {
 
     let mut client3 = connect(&filter, "unicode").await?;
     assert_eq!(client3.recv().await?, json!({ "Identity": 2 }));
+    assert!(client3.recv().await?.get("Meta").is_some());
     client3.recv().await?;
 
     let transformed_cursors_resp = json!({

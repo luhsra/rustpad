@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use common::*;
 use log::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{server, ServerConfig};
-use serde_json::{json, Value};
+use rustpad_server::{ServerConfig, server};
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
 pub mod common;
@@ -15,17 +15,19 @@ pub mod common;
 #[tokio::test]
 async fn test_lost_wakeups() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "stress", "").await;
 
     let mut client = connect(&filter, "stress").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut client2 = connect(&filter, "stress").await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
+    assert!(client2.recv().await?.get("Meta").is_some());
 
     let mut revision = 0;
     for i in 0..100 {
@@ -74,13 +76,14 @@ async fn test_lost_wakeups() -> Result<()> {
 #[tokio::test]
 async fn test_large_document() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "stress", "").await;
 
     let mut client = connect(&filter, "stress").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert(&"a".repeat(5000));

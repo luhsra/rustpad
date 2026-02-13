@@ -3,15 +3,16 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::prelude::*;
 use log::{info, warn};
 use operational_transform::OperationSeq;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 use warp::ws::{Message, WebSocket};
 
+use crate::database::PersistedDocumentMeta;
 use crate::{database::PersistedDocument, ot::transform_index};
 
 /// The main object representing a collaborative session.
@@ -29,13 +30,25 @@ pub struct Rustpad {
 }
 
 /// Shared state involving multiple users, protected by a lock.
-#[derive(Default)]
 struct State {
     operations: Vec<UserOperation>,
     text: String,
     language: String,
+    open: bool,
     users: HashMap<u64, UserInfo>,
     cursors: HashMap<u64, CursorData>,
+}
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            operations: Vec::new(),
+            text: String::new(),
+            language: "markdown".to_string(),
+            open: false,
+            users: HashMap::new(),
+            cursors: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,8 +77,11 @@ enum ClientMsg {
         revision: usize,
         operation: OperationSeq,
     },
-    /// Sets the language of the editor.
-    SetLanguage(String),
+    /// Sets the metadata of the editor.
+    SetMeta {
+        language: Option<String>,
+        open: Option<bool>,
+    },
     /// Sets the user's current information.
     ClientInfo(UserInfo),
     /// Sets the user's cursor and selection positions.
@@ -82,10 +98,14 @@ enum ServerMsg {
         start: usize,
         operations: Vec<UserOperation>,
     },
-    /// Broadcasts the current language, last writer wins.
-    Language(String),
+    /// Broadcasts the current metadata, last writer wins.
+    Meta { language: String, open: bool },
     /// Broadcasts a user's information, or `None` on disconnect.
-    UserInfo { id: u64, info: Option<UserInfo> },
+    UserInfo {
+        id: u64,
+        authenticated: bool,
+        info: Option<UserInfo>,
+    },
     /// Broadcasts a user's cursor position.
     UserCursor { id: u64, data: CursorData },
 }
@@ -119,7 +139,7 @@ impl From<PersistedDocument> for Rustpad {
         {
             let mut state = rustpad.state.write();
             state.text = document.text;
-            state.language = document.language;
+            state.language = document.meta.language;
             state.operations.push(UserOperation {
                 id: u64::MAX,
                 operation,
@@ -141,7 +161,11 @@ impl Rustpad {
         self.state.write().users.remove(&id);
         self.state.write().cursors.remove(&id);
         self.update
-            .send(ServerMsg::UserInfo { id, info: None })
+            .send(ServerMsg::UserInfo {
+                id,
+                info: None,
+                authenticated: false,
+            })
             .ok();
     }
 
@@ -156,7 +180,10 @@ impl Rustpad {
         let state = self.state.read();
         PersistedDocument {
             text: state.text.clone(),
-            language: state.language.clone(),
+            meta: PersistedDocumentMeta {
+                language: state.language.clone(),
+                open: state.open,
+            },
         }
     }
 
@@ -218,17 +245,21 @@ impl Rustpad {
         let mut messages = Vec::new();
         let revision = {
             let state = self.state.read();
+            messages.push(ServerMsg::Meta {
+                language: state.language.clone(),
+                open: state.open,
+            });
             if !state.operations.is_empty() {
                 messages.push(ServerMsg::History {
                     start: 0,
                     operations: state.operations.clone(),
                 });
             }
-            messages.push(ServerMsg::Language(state.language.clone()));
             for (&id, info) in &state.users {
                 messages.push(ServerMsg::UserInfo {
                     id,
                     info: Some(info.clone()),
+                    authenticated: false, // TODO: Inform over authentication
                 });
             }
             for (&id, data) in &state.cursors {
@@ -277,15 +308,25 @@ impl Rustpad {
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
-            ClientMsg::SetLanguage(language) => {
-                self.state.write().language = language.clone();
-                self.update.send(ServerMsg::Language(language)).ok();
+            ClientMsg::SetMeta { language, open } => {
+                let mut state = self.state.write();
+                if let Some(language) = language.clone() {
+                    state.language = language;
+                }
+                let language = state.language.clone();
+                if let Some(open) = open {
+                    state.open = open;
+                }
+                let open = state.open;
+                drop(state);
+                self.update.send(ServerMsg::Meta { language, open }).ok();
             }
             ClientMsg::ClientInfo(info) => {
                 self.state.write().users.insert(id, info.clone());
                 let msg = ServerMsg::UserInfo {
                     id,
                     info: Some(info),
+                    authenticated: false, // TODO: Inform over authentication
                 };
                 self.update.send(msg).ok();
             }

@@ -15,13 +15,14 @@ pub mod common;
 #[tokio::test]
 async fn test_single_operation() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "foobar", "").await;
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -54,13 +55,14 @@ async fn test_single_operation() -> Result<()> {
 #[tokio::test]
 async fn test_invalid_operation() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     expect_text(&filter, "foobar", "").await;
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -80,12 +82,13 @@ async fn test_invalid_operation() -> Result<()> {
 #[tokio::test]
 async fn test_concurrent_transform() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     // Connect the first client
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     // Insert the first operation
     let mut operation = OperationSeq::default();
@@ -145,6 +148,7 @@ async fn test_concurrent_transform() -> Result<()> {
     let mut client2 = connect(&filter, "foobar").await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
+    assert!(client2.recv().await?.get("Meta").is_some(), "{msg}");
 
     // Insert a concurrent operation before seeing the existing history
     time::sleep(Duration::from_millis(50)).await;
@@ -197,33 +201,34 @@ async fn test_concurrent_transform() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_set_language() -> Result<()> {
+async fn test_set_meta() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::default());
+    let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
-    let msg = json!({ "SetLanguage": "javascript" });
+    let msg = json!({ "SetMeta": { "language": "javascript", "open": false } });
     client.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Language": "javascript" }));
+    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "open": false } }));
 
     let mut client2 = connect(&filter, "foobar").await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Language": "javascript" }));
+    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "open": false } }));
 
-    let msg = json!({ "SetLanguage": "python" });
+    let msg = json!({ "SetMeta": { "language": "python", "open": true } });
     client2.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Language": "python" }));
+    assert_eq!(msg, json!({ "Meta": { "language": "python", "open": true } }));
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Language": "python" }));
+    assert_eq!(msg, json!({ "Meta": { "language": "python", "open": true } }));
 
     expect_text(&filter, "foobar", "").await;
     Ok(())

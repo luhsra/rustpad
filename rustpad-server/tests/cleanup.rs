@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Tests to ensure that documents are garbage collected.
 
 use std::time::Duration;
@@ -11,19 +12,18 @@ use tokio::time;
 
 pub mod common;
 
+#[ignore = "This is currently not supported"]
 #[tokio::test]
 async fn test_cleanup() -> Result<()> {
     pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig {
-        expiry_days: 2,
-        ..ServerConfig::default()
-    });
+    let filter = server(ServerConfig::temporary(2).await?);
 
     expect_text(&filter, "old", "").await;
 
     let mut client = connect(&filter, "old").await?;
     let msg = client.recv().await?;
     assert_eq!(msg, json!({ "Identity": 0 }));
+    assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");

@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -13,13 +14,68 @@ use log::{error, info};
 use rand::Rng;
 use serde::Serialize;
 use tokio::time::{self, Instant};
-use warp::{filters::BoxedFilter, ws::Ws, Filter, Rejection, Reply};
+use warp::{Filter, Rejection, Reply, filters::BoxedFilter, ws::Ws};
 
 use crate::{database::Database, rustpad::Rustpad};
 
 pub mod database;
 mod ot;
 mod rustpad;
+
+/// Unique identifier for a document or user.
+#[repr(align(64))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Identifier([u8; Self::MAX_LEN]);
+impl Identifier {
+    /// Maximum length of a document ID, in bytes.
+    pub const MAX_LEN: usize = 64;
+
+    fn valid_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ')
+    }
+}
+impl FromStr for Identifier {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() > Self::MAX_LEN {
+            anyhow::bail!("Document ID is too long");
+        }
+        if !s.chars().all(Self::valid_char) {
+            anyhow::bail!("Document ID contains invalid characters");
+        }
+        let mut bytes = [0u8; Self::MAX_LEN];
+        bytes[..s.len()].copy_from_slice(s.as_bytes());
+        Ok(Self(bytes))
+    }
+}
+impl AsRef<str> for Identifier {
+    fn as_ref(&self) -> &str {
+        let len = self.0.iter().position(|&b| b == 0).unwrap_or(Self::MAX_LEN);
+        std::str::from_utf8(&self.0[..len]).expect("DocumentID contains invalid UTF-8")
+    }
+}
+impl std::fmt::Display for Identifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_ref())
+    }
+}
+impl serde::Serialize for Identifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_ref())
+    }
+}
+impl<'de> serde::Deserialize<'de> for Identifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::from_str(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Server configuration, parsed from environment variables.
 #[derive(Debug, Clone)]
@@ -35,6 +91,13 @@ impl ServerConfig {
         Ok(Self {
             expiry_days,
             database: Database::new(storage).await?,
+        })
+    }
+    /// Construct a new server configuration with a temporary database for testing.
+    pub async fn temporary(expiry_days: u32) -> anyhow::Result<Self> {
+        Ok(Self {
+            expiry_days,
+            database: Database::temporary().await?,
         })
     }
     /// Load server configuration from environment variables.
@@ -85,7 +148,7 @@ impl warp::reject::Reject for CustomReject {}
 #[derive(Clone)]
 struct ServerState {
     /// Concurrent map storing in-memory documents.
-    documents: Arc<DashMap<String, Document>>,
+    documents: Arc<DashMap<Identifier, Document>>,
     /// Connection to the database pool, if persistence is enabled.
     database: Database,
 }
@@ -124,12 +187,12 @@ fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
 
     let state_filter = warp::any().map(move || state.clone());
 
-    let socket = warp::path!("socket" / String)
+    let socket = warp::path!("socket" / Identifier)
         .and(warp::ws())
         .and(state_filter.clone())
         .and_then(socket_handler);
 
-    let text = warp::path!("text" / String)
+    let text = warp::path!("text" / Identifier)
         .and(state_filter.clone())
         .and_then(text_handler);
 
@@ -146,7 +209,11 @@ fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
-async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl Reply, Rejection> {
+async fn socket_handler(
+    id: Identifier,
+    ws: Ws,
+    state: ServerState,
+) -> Result<impl Reply, Rejection> {
     use dashmap::mapref::entry::Entry;
 
     info!("socket connection for id = {}", id);
@@ -157,7 +224,7 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
             let rustpad = Arc::new(
                 state
                     .database
-                    .load(&id)
+                    .load_document(&id)
                     .await
                     .map(Rustpad::from)
                     .unwrap_or_default(),
@@ -174,12 +241,12 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
-async fn text_handler(id: String, state: ServerState) -> Result<impl Reply, Rejection> {
+async fn text_handler(id: Identifier, state: ServerState) -> Result<impl Reply, Rejection> {
     Ok(match state.documents.get(&id) {
         Some(value) => value.rustpad.text(),
         None => state
             .database
-            .load(&id)
+            .load_document(&id)
             .await
             .map(|document| document.text)
             .unwrap_or_default(),
@@ -189,7 +256,7 @@ async fn text_handler(id: String, state: ServerState) -> Result<impl Reply, Reje
 /// Handler for the `/api/stats` endpoint.
 async fn stats_handler(start_time: u64, state: ServerState) -> Result<impl Reply, Rejection> {
     let num_documents = state.documents.len();
-    let database_size = match state.database.count().await {
+    let database_size = match state.database.document_count().await {
         Ok(size) => size,
         Err(e) => return Err(warp::reject::custom(CustomReject(e))),
     };
@@ -223,7 +290,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(3);
 const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(1);
 
 /// Persists changed documents after a fixed time interval.
-async fn persister(id: String, rustpad: Arc<Rustpad>, db: Database) {
+async fn persister(id: Identifier, rustpad: Arc<Rustpad>, db: Database) {
     let mut last_revision = 0;
     while !rustpad.killed() {
         let interval = PERSIST_INTERVAL
@@ -232,7 +299,7 @@ async fn persister(id: String, rustpad: Arc<Rustpad>, db: Database) {
         let revision = rustpad.revision();
         if revision > last_revision {
             info!("persisting revision {} for id = {}", revision, id);
-            if let Err(e) = db.store(&id, &rustpad.snapshot()).await {
+            if let Err(e) = db.store_document(&id, &rustpad.snapshot()).await {
                 error!("when persisting document {}: {}", id, e);
             } else {
                 last_revision = revision;
