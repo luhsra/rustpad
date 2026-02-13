@@ -1,28 +1,17 @@
-use rustpad_server::{server, database::Database, ServerConfig};
+use rustpad_server::{ServerConfig, server};
+use std::net::SocketAddr;
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
 
-    let port = std::env::var("PORT")
-        .unwrap_or_else(|_| String::from("3030"))
+    let host: SocketAddr = std::env::var("HOST")
+        .unwrap_or_else(|_| String::from("0.0.0.0:3030"))
         .parse()
-        .expect("Unable to parse PORT");
+        .expect("Unable to parse HOST");
+    let config = ServerConfig::from_env()
+        .await
+        .expect("Unable to load server configuration");
 
-    let config = ServerConfig {
-        expiry_days: std::env::var("EXPIRY_DAYS")
-            .unwrap_or_else(|_| String::from("1"))
-            .parse()
-            .expect("Unable to parse EXPIRY_DAYS"),
-        database: match std::env::var("SQLITE_URI") {
-            Ok(uri) => Some(
-                Database::new(&uri)
-                    .await
-                    .expect("Unable to connect to SQLITE_URI"),
-            ),
-            Err(_) => None,
-        },
-    };
-
-    warp::serve(server(config)).run(([0, 0, 0, 0], port)).await;
+    warp::serve(server(config)).run(host).await;
 }

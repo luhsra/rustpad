@@ -76,7 +76,7 @@ function Footer({
                 <Dialog.Title>Load Sample</Dialog.Title>
               </Dialog.Header>
               <Dialog.Body>
-                <Text>Delete this document and load the sample?</Text>
+                <Text>Delete this document and load the example code?</Text>
               </Dialog.Body>
               <Dialog.Footer>
                 <Dialog.ActionTrigger asChild>
@@ -84,7 +84,7 @@ function Footer({
                 </Dialog.ActionTrigger>
                 <Dialog.ActionTrigger asChild>
                   <Button onClick={onLoadSample} colorPalette="red">
-                    Load Sample
+                    Delete and Load
                   </Button>
                 </Dialog.ActionTrigger>
               </Dialog.Footer>

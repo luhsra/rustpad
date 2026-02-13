@@ -33,7 +33,7 @@ pub struct Rustpad {
 struct State {
     operations: Vec<UserOperation>,
     text: String,
-    language: Option<String>,
+    language: String,
     users: HashMap<u64, UserInfo>,
     cursors: HashMap<u64, CursorData>,
 }
@@ -224,9 +224,7 @@ impl Rustpad {
                     operations: state.operations.clone(),
                 });
             }
-            if let Some(language) = &state.language {
-                messages.push(ServerMsg::Language(language.clone()));
-            }
+            messages.push(ServerMsg::Language(state.language.clone()));
             for (&id, info) in &state.users {
                 messages.push(ServerMsg::UserInfo {
                     id,
@@ -280,7 +278,7 @@ impl Rustpad {
                 self.notify.notify_waiters();
             }
             ClientMsg::SetLanguage(language) => {
-                self.state.write().language = Some(language.clone());
+                self.state.write().language = language.clone();
                 self.update.send(ServerMsg::Language(language)).ok();
             }
             ClientMsg::ClientInfo(info) => {

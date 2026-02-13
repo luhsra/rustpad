@@ -1,5 +1,5 @@
 import { Box, Flex, HStack, Icon, IconButton, Text } from "@chakra-ui/react";
-import { VscColorMode } from "react-icons/vsc";
+import { VscAdd, VscColorMode } from "react-icons/vsc";
 
 import { type ConnectionState } from "./App";
 import ConnectionStatus from "./ConnectionStatus";

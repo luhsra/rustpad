@@ -3,9 +3,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use anyhow::Context;
 use dashmap::DashMap;
 use log::{error, info};
 use rand::Rng;
@@ -18,6 +20,35 @@ use crate::{database::Database, rustpad::Rustpad};
 pub mod database;
 mod ot;
 mod rustpad;
+
+/// Server configuration, parsed from environment variables.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Number of days after which documents are garbage collected.
+    pub expiry_days: u32,
+    /// Database for document persistence.
+    pub database: Database,
+}
+impl ServerConfig {
+    /// Construct a new server configuration.
+    pub async fn new(expiry_days: u32, storage: PathBuf) -> anyhow::Result<Self> {
+        Ok(Self {
+            expiry_days,
+            database: Database::new(storage).await?,
+        })
+    }
+    /// Load server configuration from environment variables.
+    pub async fn from_env() -> anyhow::Result<Self> {
+        let expiry_days = std::env::var("EXPIRY_DAYS")
+            .unwrap_or_else(|_| String::from("1"))
+            .parse()
+            .context("Unable to parse EXPIRY_DAYS")?;
+        let storage = std::env::var("STORAGE")
+            .unwrap_or_else(|_| String::from("storage"))
+            .into();
+        Self::new(expiry_days, storage).await
+    }
+}
 
 /// An entry stored in the global server map.
 ///
@@ -56,7 +87,7 @@ struct ServerState {
     /// Concurrent map storing in-memory documents.
     documents: Arc<DashMap<String, Document>>,
     /// Connection to the database pool, if persistence is enabled.
-    database: Option<Database>,
+    database: Database,
 }
 
 /// Statistics about the server, returned from an API endpoint.
@@ -70,28 +101,10 @@ struct Stats {
     database_size: usize,
 }
 
-/// Server configuration.
-#[derive(Clone, Debug)]
-pub struct ServerConfig {
-    /// Number of days to clean up documents after inactivity.
-    pub expiry_days: u32,
-    /// Database object, for persistence if desired.
-    pub database: Option<Database>,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            expiry_days: 1,
-            database: None,
-        }
-    }
-}
-
 /// A combined filter handling all server routes.
 pub fn server(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
     warp::path("api")
-        .and(backend(config))
+        .and(backend(config.database, config.expiry_days))
         .or(frontend())
         .boxed()
 }
@@ -102,12 +115,12 @@ fn frontend() -> BoxedFilter<(impl Reply,)> {
 }
 
 /// Construct backend routes, including WebSocket handlers.
-fn backend(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
+fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
     let state = ServerState {
         documents: Default::default(),
-        database: config.database,
+        database,
     };
-    tokio::spawn(cleaner(state.clone(), config.expiry_days));
+    tokio::spawn(cleaner(state.clone(), expiry_days));
 
     let state_filter = warp::any().map(move || state.clone());
 
@@ -141,13 +154,15 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {
-            let rustpad = Arc::new(match &state.database {
-                Some(db) => db.load(&id).await.map(Rustpad::from).unwrap_or_default(),
-                None => Rustpad::default(),
-            });
-            if let Some(db) = &state.database {
-                tokio::spawn(persister(id, Arc::clone(&rustpad), db.clone()));
-            }
+            let rustpad = Arc::new(
+                state
+                    .database
+                    .load(&id)
+                    .await
+                    .map(Rustpad::from)
+                    .unwrap_or_default(),
+            );
+            tokio::spawn(persister(id, Arc::clone(&rustpad), state.database.clone()));
             e.insert(Document::new(rustpad))
         }
     };
@@ -162,28 +177,21 @@ async fn socket_handler(id: String, ws: Ws, state: ServerState) -> Result<impl R
 async fn text_handler(id: String, state: ServerState) -> Result<impl Reply, Rejection> {
     Ok(match state.documents.get(&id) {
         Some(value) => value.rustpad.text(),
-        None => {
-            if let Some(db) = &state.database {
-                db.load(&id)
-                    .await
-                    .map(|document| document.text)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        }
+        None => state
+            .database
+            .load(&id)
+            .await
+            .map(|document| document.text)
+            .unwrap_or_default(),
     })
 }
 
 /// Handler for the `/api/stats` endpoint.
 async fn stats_handler(start_time: u64, state: ServerState) -> Result<impl Reply, Rejection> {
     let num_documents = state.documents.len();
-    let database_size = match state.database {
-        None => 0,
-        Some(db) => match db.count().await {
-            Ok(size) => size,
-            Err(e) => return Err(warp::reject::custom(CustomReject(e))),
-        },
+    let database_size = match state.database.count().await {
+        Ok(size) => size,
+        Err(e) => return Err(warp::reject::custom(CustomReject(e))),
     };
     Ok(warp::reply::json(&Stats {
         start_time,
