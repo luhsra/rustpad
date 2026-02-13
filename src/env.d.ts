@@ -1,7 +1,2 @@
-interface ImportMetaEnv {
-    readonly VERSION?: string;
-}
-
-interface ImportMeta {
-    readonly env?: ImportMetaEnv;
-}
+const BUNDLER: string | undefined;
+const VERSION: string | undefined;

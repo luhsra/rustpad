@@ -17,7 +17,7 @@ export type RustpadOptions = {
   readonly onConnected?: () => void;
   readonly onDisconnected?: () => void;
   readonly onDesynchronized?: () => void;
-  readonly onChangeLanguage?: (language: string) => void;
+  readonly onChangeMeta?: (language: string, open: boolean) => void;
   readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
   readonly reconnectInterval?: number;
 };
@@ -103,9 +103,9 @@ class Rustpad {
     this.ws?.close();
   }
 
-  /** Try to set the language of the editor, if connected. */
-  setLanguage(language: string): boolean {
-    this.ws?.send(`{"SetLanguage":${JSON.stringify(language)}}`);
+  /** Try to set the metadata of the editor, if connected. */
+  setMeta(language?: string, open?: boolean): boolean {
+    this.ws?.send(JSON.stringify({ SetMeta: { language, open } }));
     return this.ws !== undefined;
   }
 
@@ -186,8 +186,8 @@ class Rustpad {
           this.applyServer(operation);
         }
       }
-    } else if (msg.Language !== undefined) {
-      this.options.onChangeLanguage?.(msg.Language);
+    } else if (msg.Meta !== undefined) {
+      this.options.onChangeMeta?.(msg.Meta.language, msg.Meta.open);
     } else if (msg.UserInfo !== undefined) {
       const { id, info } = msg.UserInfo;
       if (id !== this.me) {
@@ -200,6 +200,9 @@ class Rustpad {
         }
         this.updateCursors();
         this.options.onChangeUsers?.(this.users);
+      } else if (info == null) {
+        // Disconnection, can happen if user document becomes private
+        this.ws?.close();
       }
     } else if (msg.UserCursor !== undefined) {
       const { id, data } = msg.UserCursor;
@@ -453,9 +456,13 @@ type ServerMsg = {
     start: number;
     operations: UserOperation[];
   };
-  Language?: string;
+  Meta?: {
+    language: string;
+    open: boolean;
+  };
   UserInfo?: {
     id: number;
+    authenticated: boolean;
     info: UserInfo | null;
   };
   UserCursor?: {

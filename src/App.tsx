@@ -20,7 +20,7 @@ const sampleText = typeof Bun !== "undefined"
   ? await Bun.file(readme as any).text()
   : await fetch(readme as any).then((response) => response.text());
 
-const version = import.meta.env?.VERSION || "dev";
+const VERSION = "dev";
 
 function getWsUri(id: string) {
   let url = new URL(`api/socket/${id}`, window.location.href);
@@ -90,7 +90,7 @@ function App() {
             duration: undefined,
           });
         },
-        onChangeLanguage: (language) => {
+        onChangeMeta: (language, open) => {
           if (languages.getLanguages().some((it) => it.id === language)) {
             setLanguage(language);
           }
@@ -112,7 +112,7 @@ function App() {
 
   function handleLanguageChange(language: string) {
     setLanguage(language);
-    if (rustpad.current?.setLanguage(language)) {
+    if (rustpad.current?.setMeta(language)) {
       toaster.create({
         title: "Language updated",
         description: (
@@ -152,7 +152,7 @@ function App() {
     <Flex direction="column" h="100vh" overflow="hidden">
       <Header
         toggleColorMode={toggleColorMode}
-        version={version}
+        version={VERSION}
         connection={connection}
       />
       <Box flex="1 0" minH={0}>

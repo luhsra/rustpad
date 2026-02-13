@@ -1,10 +1,19 @@
 import pkg from "./package.json";
 
 await Bun.build({
-    entrypoints: ['./index.html'],
+    entrypoints: [
+        './index.html',
+        './src/monaco/editor.worker.ts',
+        './src/monaco/html.worker.ts',
+        './src/monaco/json.worker.ts',
+        './src/monaco/css.worker.ts',
+        './src/monaco/ts.worker.ts',
+    ],
     outdir: './dist',
+    target: 'browser',
+    minify: true,
     define: {
-        // Mimic Vite's import.meta.env
-        "import.meta.env.VERSION": JSON.stringify(pkg.version),
-    }
+        "VERSION": `"${pkg.version}"`,
+        "BUNDLER": "\"bun\"",
+    },
 });
