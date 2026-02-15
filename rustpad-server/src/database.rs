@@ -1,8 +1,8 @@
 //! Backend SQLite database handlers for persisting documents.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use rand::random;
 use serde::{Deserialize, Serialize};
@@ -56,10 +56,10 @@ pub struct RecentDocument {
 }
 
 /// A driver for database operations wrapping a pool connection.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Database {
     storage: PathBuf,
-    users: Arc<DashMap<Identifier, PersistedUser>>,
+    users: DashMap<Identifier, PersistedUser>,
 }
 
 impl Database {
@@ -70,7 +70,7 @@ impl Database {
         }
         let this = Self {
             storage,
-            users: Arc::new(DashMap::new()),
+            users: DashMap::new(),
         };
         fs::create_dir_all(this.document_path()).await?;
         fs::create_dir_all(this.user_path()).await?;
@@ -102,8 +102,7 @@ impl Database {
 
     /// Construct a new database in a temporary directory for testing.
     pub async fn temporary() -> Result<Self> {
-        let storage =
-            std::env::temp_dir().join(format!("rustpad_{:x}", random::<u64>()));
+        let storage = std::env::temp_dir().join(format!("rustpad_{:x}", random::<u64>()));
         Self::new(storage).await
     }
 
@@ -129,8 +128,31 @@ impl Database {
     ) -> Result<()> {
         let path = self.document_path_for(document_id);
         let meta_path = self.document_meta_path_for(document_id);
-        fs::write(path, document.text.clone()).await?;
-        fs::write(meta_path, serde_json::to_string_pretty(&document.meta)?).await?;
+        let document = document.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::store_document_blocking_raw(&path, &meta_path, &document)
+        })
+        .await??;
+        Ok(())
+    }
+    pub fn store_document_blocking(
+        &self,
+        document_id: &Identifier,
+        document: &PersistedDocument,
+    ) -> Result<()> {
+        let path = self.document_path_for(document_id);
+        let meta_path = self.document_meta_path_for(document_id);
+        Self::store_document_blocking_raw(&path, &meta_path, document)?;
+        Ok(())
+    }
+    fn store_document_blocking_raw(
+        path: &Path,
+        meta_path: &Path,
+        document: &PersistedDocument,
+    ) -> Result<()> {
+        std::fs::write(path, &document.text).context("Failed to write document")?;
+        std::fs::write(meta_path, serde_json::to_string_pretty(&document.meta)?)
+            .context("Failed to write meta")?;
         Ok(())
     }
 

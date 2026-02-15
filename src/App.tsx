@@ -3,7 +3,9 @@ import { editor, languages } from "monaco-editor";
 import { useEffect, useRef, useState } from "react";
 import useLocalStorageState from "use-local-storage-state";
 
-import "./monaco-config"; // Configure monaco before using it
+// Configure monaco before using it
+import "./monaco-config";
+
 import readme from "../README.md";
 import Footer from "./Footer";
 import Header from "./Header";
@@ -86,6 +88,15 @@ function App() {
           toaster.create({
             title: "Desynchronized with server",
             description: "Please save your work and refresh the page.",
+            type: "error",
+            duration: undefined,
+          });
+        },
+        onError: (error) => {
+          setConnection("disconnected");
+          toaster.create({
+            title: "Cannot open document",
+            description: "The name can only contain letters, numbers, hyphens and underscores.",
             type: "error",
             duration: undefined,
           });

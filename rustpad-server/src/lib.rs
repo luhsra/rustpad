@@ -78,7 +78,7 @@ impl<'de> serde::Deserialize<'de> for Identifier {
 }
 
 /// Server configuration, parsed from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServerConfig {
     /// Number of days after which documents are garbage collected.
     pub expiry_days: u32,
@@ -145,12 +145,31 @@ struct CustomReject(anyhow::Error);
 impl warp::reject::Reject for CustomReject {}
 
 /// The shared state of the server, accessible from within request handlers.
-#[derive(Clone)]
 struct ServerState {
     /// Concurrent map storing in-memory documents.
-    documents: Arc<DashMap<Identifier, Document>>,
+    documents: DashMap<Identifier, Document>,
     /// Connection to the database pool, if persistence is enabled.
     database: Database,
+}
+impl Drop for ServerState {
+    fn drop(&mut self) {
+        info!("shutting down, saving documents...");
+        futures::executor::block_on(async {
+            for entry in &self.documents {
+                let (id, value) = entry.pair();
+                info!(
+                    "persisting document {id} with revision {}",
+                    value.rustpad.revision().await
+                );
+                if let Err(e) = self
+                    .database
+                    .store_document_blocking(id, &value.rustpad.snapshot().await)
+                {
+                    error!("Error persisting document {id}: {e:?}");
+                }
+            }
+        });
+    }
 }
 
 /// Statistics about the server, returned from an API endpoint.
@@ -179,10 +198,10 @@ fn frontend() -> BoxedFilter<(impl Reply,)> {
 
 /// Construct backend routes, including WebSocket handlers.
 fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
-    let state = ServerState {
+    let state = Arc::new(ServerState {
         documents: Default::default(),
         database,
-    };
+    });
     tokio::spawn(cleaner(state.clone(), expiry_days));
 
     let state_filter = warp::any().map(move || state.clone());
@@ -212,7 +231,7 @@ fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
 async fn socket_handler(
     id: Identifier,
     ws: Ws,
-    state: ServerState,
+    state: Arc<ServerState>,
 ) -> Result<impl Reply, Rejection> {
     use dashmap::mapref::entry::Entry;
 
@@ -226,7 +245,7 @@ async fn socket_handler(
             } else {
                 Arc::new(Rustpad::default())
             };
-            tokio::spawn(persister(id, Arc::clone(&rustpad), state.database.clone()));
+            tokio::spawn(persister(id, Arc::clone(&rustpad), state.clone()));
             e.insert(Document::new(rustpad))
         }
     };
@@ -238,7 +257,7 @@ async fn socket_handler(
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
-async fn text_handler(id: Identifier, state: ServerState) -> Result<impl Reply, Rejection> {
+async fn text_handler(id: Identifier, state: Arc<ServerState>) -> Result<impl Reply, Rejection> {
     Ok(match state.documents.get(&id) {
         Some(value) => value.rustpad.text().await,
         None => state
@@ -251,7 +270,7 @@ async fn text_handler(id: Identifier, state: ServerState) -> Result<impl Reply, 
 }
 
 /// Handler for the `/api/stats` endpoint.
-async fn stats_handler(start_time: u64, state: ServerState) -> Result<impl Reply, Rejection> {
+async fn stats_handler(start_time: u64, state: Arc<ServerState>) -> Result<impl Reply, Rejection> {
     let num_documents = state.documents.len();
     let database_size = match state.database.document_count().await {
         Ok(size) => size,
@@ -267,11 +286,11 @@ async fn stats_handler(start_time: u64, state: ServerState) -> Result<impl Reply
 const HOUR: Duration = Duration::from_secs(3600);
 
 /// Reclaims memory for documents.
-async fn cleaner(state: ServerState, expiry_days: u32) {
+async fn cleaner(state: Arc<ServerState>, expiry_days: u32) {
     loop {
         time::sleep(HOUR).await;
         let mut keys = Vec::new();
-        for entry in &*state.documents {
+        for entry in &state.documents {
             if entry.last_accessed.elapsed() > HOUR * 24 * expiry_days {
                 keys.push(entry.key().clone());
             }
@@ -287,7 +306,7 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(3);
 const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(1);
 
 /// Persists changed documents after a fixed time interval.
-async fn persister(id: Identifier, rustpad: Arc<Rustpad>, db: Database) {
+async fn persister(id: Identifier, rustpad: Arc<Rustpad>, state: Arc<ServerState>) {
     let mut last_revision = 0;
     while !rustpad.killed() {
         let interval = PERSIST_INTERVAL + random_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
@@ -295,7 +314,11 @@ async fn persister(id: Identifier, rustpad: Arc<Rustpad>, db: Database) {
         let revision = rustpad.revision().await;
         if revision > last_revision {
             info!("persisting revision {} for id = {}", revision, id);
-            if let Err(e) = db.store_document(&id, &rustpad.snapshot().await).await {
+            if let Err(e) = state
+                .database
+                .store_document(&id, &rustpad.snapshot().await)
+                .await
+            {
                 error!("when persisting document {}: {}", id, e);
             } else {
                 last_revision = revision;

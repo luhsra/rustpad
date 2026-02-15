@@ -17,6 +17,7 @@ export type RustpadOptions = {
   readonly onConnected?: () => void;
   readonly onDisconnected?: () => void;
   readonly onDesynchronized?: () => void;
+  readonly onError?: (error: Event) => void;
   readonly onChangeMeta?: (language: string, open: boolean) => void;
   readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
   readonly reconnectInterval?: number;
@@ -158,6 +159,11 @@ class Rustpad {
       } else {
         this.connecting = false;
       }
+    };
+    ws.onerror = (e) => {
+      console.error("error connecting to", this.options.uri, e);
+      this.dispose();
+      this.options.onError?.(e);
     };
     ws.onmessage = ({ data }) => {
       if (typeof data === "string") {

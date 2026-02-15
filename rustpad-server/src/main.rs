@@ -13,5 +13,15 @@ async fn main() {
         .await
         .expect("Unable to load server configuration");
 
-    warp::serve(server(config)).run(host).await;
+    warp::serve(server(config))
+        .bind(host)
+        .await
+        // Yes we actually want to persist documents on shutdown...
+        .graceful(async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen to ctrlc")
+        })
+        .run()
+        .await;
 }
