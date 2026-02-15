@@ -7,9 +7,8 @@ use anyhow::{Context, Result, bail};
 use futures::prelude::*;
 use log::{info, warn};
 use operational_transform::OperationSeq;
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, RwLock, broadcast};
 use warp::ws::{Message, WebSocket};
 
 use crate::database::PersistedDocumentMeta;
@@ -130,14 +129,14 @@ impl Default for Rustpad {
     }
 }
 
-impl From<PersistedDocument> for Rustpad {
-    fn from(document: PersistedDocument) -> Self {
+impl Rustpad {
+    pub async fn load(document: PersistedDocument) -> Self {
         let mut operation = OperationSeq::default();
         operation.insert(&document.text);
 
         let rustpad = Self::default();
         {
-            let mut state = rustpad.state.write();
+            let mut state = rustpad.state.write().await;
             state.text = document.text;
             state.language = document.meta.language;
             state.operations.push(UserOperation {
@@ -147,9 +146,6 @@ impl From<PersistedDocument> for Rustpad {
         }
         rustpad
     }
-}
-
-impl Rustpad {
     /// Handle a connection from a WebSocket.
     pub async fn on_connection(&self, socket: WebSocket) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
@@ -158,8 +154,11 @@ impl Rustpad {
             warn!("connection terminated early: {}", e);
         }
         info!("disconnection, id = {}", id);
-        self.state.write().users.remove(&id);
-        self.state.write().cursors.remove(&id);
+        {
+            let mut state = self.state.write().await;
+            state.users.remove(&id);
+            state.cursors.remove(&id);
+        }
         self.update
             .send(ServerMsg::UserInfo {
                 id,
@@ -170,14 +169,14 @@ impl Rustpad {
     }
 
     /// Returns a snapshot of the latest text.
-    pub fn text(&self) -> String {
-        let state = self.state.read();
+    pub async fn text(&self) -> String {
+        let state = self.state.read().await;
         state.text.clone()
     }
 
     /// Returns a snapshot of the current document for persistence.
-    pub fn snapshot(&self) -> PersistedDocument {
-        let state = self.state.read();
+    pub async fn snapshot(&self) -> PersistedDocument {
+        let state = self.state.read().await;
         PersistedDocument {
             text: state.text.clone(),
             meta: PersistedDocumentMeta {
@@ -188,8 +187,8 @@ impl Rustpad {
     }
 
     /// Returns the current revision.
-    pub fn revision(&self) -> usize {
-        let state = self.state.read();
+    pub async fn revision(&self) -> usize {
+        let state = self.state.read().await;
         state.operations.len()
     }
 
@@ -217,7 +216,7 @@ impl Rustpad {
             if self.killed() {
                 break;
             }
-            if self.revision() > revision {
+            if self.revision().await > revision {
                 revision = self.send_history(revision, &mut socket).await?
             }
 
@@ -244,7 +243,7 @@ impl Rustpad {
         socket.send(ServerMsg::Identity(id).into()).await?;
         let mut messages = Vec::new();
         let revision = {
-            let state = self.state.read();
+            let state = self.state.read().await;
             messages.push(ServerMsg::Meta {
                 language: state.language.clone(),
                 open: state.open,
@@ -278,7 +277,7 @@ impl Rustpad {
 
     async fn send_history(&self, start: usize, socket: &mut WebSocket) -> Result<usize> {
         let operations = {
-            let state = self.state.read();
+            let state = self.state.read().await;
             let len = state.operations.len();
             if start < len {
                 state.operations[start..].to_owned()
@@ -305,11 +304,12 @@ impl Rustpad {
                 operation,
             } => {
                 self.apply_edit(id, revision, operation)
+                    .await
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
             ClientMsg::SetMeta { language, open } => {
-                let mut state = self.state.write();
+                let mut state = self.state.write().await;
                 if let Some(language) = language.clone() {
                     state.language = language;
                 }
@@ -322,7 +322,7 @@ impl Rustpad {
                 self.update.send(ServerMsg::Meta { language, open }).ok();
             }
             ClientMsg::ClientInfo(info) => {
-                self.state.write().users.insert(id, info.clone());
+                self.state.write().await.users.insert(id, info.clone());
                 let msg = ServerMsg::UserInfo {
                     id,
                     info: Some(info),
@@ -331,7 +331,7 @@ impl Rustpad {
                 self.update.send(msg).ok();
             }
             ClientMsg::CursorData(data) => {
-                self.state.write().cursors.insert(id, data.clone());
+                self.state.write().await.cursors.insert(id, data.clone());
                 let msg = ServerMsg::UserCursor { id, data };
                 self.update.send(msg).ok();
             }
@@ -339,7 +339,12 @@ impl Rustpad {
         Ok(())
     }
 
-    fn apply_edit(&self, id: u64, revision: usize, mut operation: OperationSeq) -> Result<()> {
+    async fn apply_edit(
+        &self,
+        id: u64,
+        revision: usize,
+        mut operation: OperationSeq,
+    ) -> Result<()> {
         info!(
             "edit: id = {}, revision = {}, base_len = {}, target_len = {}",
             id,
@@ -347,7 +352,7 @@ impl Rustpad {
             operation.base_len(),
             operation.target_len()
         );
-        let state = self.state.upgradable_read();
+        let mut state = self.state.write().await;
         let len = state.operations.len();
         if revision > len {
             bail!("got revision {}, but current is {}", revision, len);
@@ -362,7 +367,6 @@ impl Rustpad {
             );
         }
         let new_text = operation.apply(&state.text)?;
-        let mut state = RwLockUpgradableReadGuard::upgrade(state);
         for (_, data) in state.cursors.iter_mut() {
             for cursor in data.cursors.iter_mut() {
                 *cursor = transform_index(&operation, *cursor);

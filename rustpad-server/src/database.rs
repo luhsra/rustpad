@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, bail};
 use dashmap::DashMap;
-use rand::{Rng as _, thread_rng};
+use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -103,7 +103,7 @@ impl Database {
     /// Construct a new database in a temporary directory for testing.
     pub async fn temporary() -> Result<Self> {
         let storage =
-            std::env::temp_dir().join(format!("rustpad_{:x}", thread_rng().r#gen::<u64>()));
+            std::env::temp_dir().join(format!("rustpad_{:x}", random::<u64>()));
         Self::new(storage).await
     }
 

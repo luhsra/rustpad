@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Context;
 use dashmap::DashMap;
 use log::{error, info};
-use rand::Rng;
+use rand::random_range;
 use serde::Serialize;
 use tokio::time::{self, Instant};
 use warp::{Filter, Rejection, Reply, filters::BoxedFilter, ws::Ws};
@@ -221,14 +221,11 @@ async fn socket_handler(
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {
-            let rustpad = Arc::new(
-                state
-                    .database
-                    .load_document(&id)
-                    .await
-                    .map(Rustpad::from)
-                    .unwrap_or_default(),
-            );
+            let rustpad = if let Ok(document) = state.database.load_document(&id).await {
+                Arc::new(Rustpad::load(document).await)
+            } else {
+                Arc::new(Rustpad::default())
+            };
             tokio::spawn(persister(id, Arc::clone(&rustpad), state.database.clone()));
             e.insert(Document::new(rustpad))
         }
@@ -243,7 +240,7 @@ async fn socket_handler(
 /// Handler for the `/api/text/{id}` endpoint.
 async fn text_handler(id: Identifier, state: ServerState) -> Result<impl Reply, Rejection> {
     Ok(match state.documents.get(&id) {
-        Some(value) => value.rustpad.text(),
+        Some(value) => value.rustpad.text().await,
         None => state
             .database
             .load_document(&id)
@@ -293,13 +290,12 @@ const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(1);
 async fn persister(id: Identifier, rustpad: Arc<Rustpad>, db: Database) {
     let mut last_revision = 0;
     while !rustpad.killed() {
-        let interval = PERSIST_INTERVAL
-            + rand::thread_rng().gen_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
+        let interval = PERSIST_INTERVAL + random_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
         time::sleep(interval).await;
-        let revision = rustpad.revision();
+        let revision = rustpad.revision().await;
         if revision > last_revision {
             info!("persisting revision {} for id = {}", revision, id);
-            if let Err(e) = db.store_document(&id, &rustpad.snapshot()).await {
+            if let Err(e) = db.store_document(&id, &rustpad.snapshot().await).await {
                 error!("when persisting document {}: {}", id, e);
             } else {
                 last_revision = revision;
