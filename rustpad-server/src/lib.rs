@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use log::{error, info};
 use rand::random_range;
 use serde::Serialize;
+use tokio::sync::Notify;
 use tokio::time::{self, Instant};
 use warp::reply::Response;
 use warp::{Filter, Rejection, Reply, filters::BoxedFilter, ws::Ws};
@@ -24,7 +25,7 @@ mod util;
 use util::Identifier;
 
 use crate::rustpad::UserInfo;
-use crate::util::SessionState;
+use crate::util::{Session, SessionState};
 
 /// Server configuration, parsed from environment variables.
 #[derive(Debug)]
@@ -122,25 +123,21 @@ struct ServerState {
     database: Database,
     /// User sessions for authentication, if enabled.
     users: auth::UserSessions,
+    /// Used to notify the persister task to continue persisting documents.
+    notify_persister: Notify,
 }
 impl Drop for ServerState {
     fn drop(&mut self) {
         info!("shutting down, saving documents...");
-        futures::executor::block_on(async {
-            for entry in &self.documents {
-                let (id, value) = entry.pair();
-                info!(
-                    "persisting document {id} with revision {}",
-                    value.rustpad.revision().await
-                );
-                if let Err(e) = self
-                    .database
-                    .store_document_blocking(id, &value.rustpad.snapshot().await)
-                {
+        for entry in &self.documents {
+            let (id, value) = entry.pair();
+            if let Some(snapshot) = value.rustpad.dirty_snapshot_blocking() {
+                info!("persisting document {id}");
+                if let Err(e) = self.database.store_document_blocking(id, &snapshot) {
                     error!("Error persisting document {id}: {e:?}");
                 }
             }
-        });
+        }
     }
 }
 
@@ -160,26 +157,22 @@ struct Stats {
 }
 
 /// A combined filter handling all server routes.
-pub fn server(config: ServerConfig) -> BoxedFilter<(Response,)> {
-    SessionState::filter()
-        .and(
-            warp::path("api")
-                .and(backend(config))
-                .or(frontend())
-                .unify()
-                .boxed(),
-        )
-        .map(|session: SessionState, reply: Response| session.attach_reply(reply))
+pub fn server(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
+    warp::path("api")
+        .and(backend(config))
+        .or(frontend())
         .boxed()
 }
 
 /// Construct routes for static files from React.
-fn frontend() -> BoxedFilter<(Response,)> {
+fn frontend() -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     warp::fs::dir("dist").map(Reply::into_response).boxed()
 }
 
 /// Construct backend routes, including WebSocket handlers.
-fn backend(config: ServerConfig) -> BoxedFilter<(Response,)> {
+fn backend(
+    config: ServerConfig,
+) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     let ServerConfig {
         expiry_days,
         database,
@@ -189,68 +182,65 @@ fn backend(config: ServerConfig) -> BoxedFilter<(Response,)> {
         documents: Default::default(),
         database,
         users: auth::UserSessions::new(openid),
+        notify_persister: Notify::new(),
     });
 
+    tokio::spawn(persister(state.clone()));
     let state_filter = warp::any().map(move || state.clone());
 
-    let socket = warp::path!("socket" / Identifier)
-        .and(SessionState::filter())
+    let socket = SessionState::filter()
+        .and(warp::path!("socket" / Identifier))
         .and(warp::ws())
         .and(state_filter.clone())
-        .and_then(socket_handler);
+        .and_then(
+            async |ss: SessionState, id, ws, s| -> Result<_, Rejection> {
+                Ok((ss.clone(), socket_handler(id, ss.session, ws, s).await?))
+            },
+        );
 
-    let text = warp::path!("text" / Identifier)
-        .and(SessionState::filter())
+    let text = SessionState::filter()
+        .and(warp::path!("text" / Identifier))
         .and(state_filter.clone())
-        .and_then(text_handler);
+        .and_then(async |ss: SessionState, id, s| -> Result<_, Rejection> {
+            Ok((ss.clone(), text_handler(id, ss.session, s).await?))
+        });
 
     let start_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("SystemTime returned before UNIX_EPOCH")
         .as_secs();
-    let stats = warp::path!("stats")
-        .and(SessionState::filter())
+    let stats = SessionState::filter()
+        .and(warp::path!("stats"))
         .and(warp::any().map(move || start_time))
         .and(state_filter.clone())
-        .and_then(stats_handler);
+        .and_then(async |ss: SessionState, t, s| -> Result<_, Rejection> {
+            Ok((ss.clone(), stats_handler(ss.session, t, s).await?))
+        });
 
-    let login = warp::path("login")
-        .and(SessionState::filter())
-        .and(warp::get())
+    let login = SessionState::filter()
+        .and(warp::path("login"))
         .and(state_filter.clone())
         .and(warp::query::<auth::LoginQuery>())
-        .and_then(
-            async move |session: SessionState, state, query| -> Result<_, Rejection> {
-                auth::login(state, session.session.clone(), query)
-                    .await
-                    .map(|reply| reply.into_response())
-            },
-        );
+        .and_then(async |ss: SessionState, s, q| -> Result<_, Rejection> {
+            Ok((ss.clone(), auth::login(s, ss.session, q).await?))
+        });
 
-    let authorized = warp::path("authorized")
+    let authorized = SessionState::filter()
+        .and(warp::path("authorized"))
         .and(warp::get())
-        .and(SessionState::filter())
+        .and(state_filter.clone())
         .and(warp::query::<auth::AuthorizedQuery>())
-        .and(state_filter.clone())
-        .and_then(
-            async move |session: SessionState, query, state| -> Result<_, Rejection> {
-                auth::authorized(state, session.session.clone(), query)
-                    .await
-                    .map(|reply| reply.into_response())
-            },
-        );
+        .and_then(async |ss: SessionState, s, q| -> Result<_, Rejection> {
+            Ok((ss.clone(), auth::authorized(s, ss.session, q).await?))
+        });
 
-    let logout = warp::path("logout")
+    let logout = SessionState::filter()
+        .and(warp::path("logout"))
         .and(warp::get())
-        .and(SessionState::filter())
         .and(state_filter.clone())
-        .and_then(
-            async move |session: SessionState, state| -> Result<_, Rejection> {
-                auth::logout(state, session.session)
-                    .await
-                    .map(|reply| reply.into_response())
-            },
-        );
+        .and_then(async |ss: SessionState, s| -> Result<_, Rejection> {
+            Ok((ss.clone(), auth::logout(s, ss.session).await?))
+        });
 
     socket
         .or(text)
@@ -263,19 +253,20 @@ fn backend(config: ServerConfig) -> BoxedFilter<(Response,)> {
         .unify()
         .or(logout)
         .unify()
-        .boxed()
+        .untuple_one()
+        .map(SessionState::attach_reply)
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
 async fn socket_handler(
     id: Identifier,
-    session: SessionState,
+    session: Session,
     ws: Ws,
     state: Arc<ServerState>,
 ) -> Result<Response, Rejection> {
     use dashmap::mapref::entry::Entry;
 
-    let user = state.users.get_user(&session.session).await;
+    let user = state.users.get_user(&session).await;
     let is_admin = user.as_ref().map(|u| u.admin).unwrap_or(false);
 
     info!("socket connection for id = {id}");
@@ -300,8 +291,10 @@ async fn socket_handler(
             } else {
                 Arc::new(Rustpad::default())
             };
-            tokio::spawn(persister(id.clone(), Arc::clone(&rustpad), state.clone()));
-            e.insert(Document::new(rustpad))
+            let inserted = e.insert(Document::new(rustpad));
+            // Wakeup if the persister is sleeping
+            state.notify_persister.notify_waiters();
+            inserted
         }
     };
 
@@ -319,7 +312,7 @@ async fn socket_handler(
 /// Handler for the `/api/text/{id}` endpoint.
 async fn text_handler(
     id: Identifier,
-    session: SessionState,
+    session: Session,
     state: Arc<ServerState>,
 ) -> Result<Response, Rejection> {
     let document = match state.documents.get(&id) {
@@ -332,7 +325,7 @@ async fn text_handler(
             document.meta.limited
         );
         if document.meta.limited {
-            if let Some(user) = state.users.get_user(&session.session).await
+            if let Some(user) = state.users.get_user(&session).await
                 && user.admin
             {
                 info!("access {} -> {id}", user.name);
@@ -352,7 +345,7 @@ async fn text_handler(
 
 /// Handler for the `/api/stats` endpoint.
 async fn stats_handler(
-    session: SessionState,
+    session: Session,
     start_time: u64,
     state: Arc<ServerState>,
 ) -> Result<Response, Rejection> {
@@ -361,7 +354,7 @@ async fn stats_handler(
         Ok(size) => size,
         Err(e) => return Err(warp::reject::custom(CustomReject(e))),
     };
-    let user = state.users.get_user(&session.session).await;
+    let user = state.users.get_user(&session).await;
     Ok(warp::reply::json(&Stats {
         start_time,
         num_documents,
@@ -372,32 +365,50 @@ async fn stats_handler(
     .into_response())
 }
 
-const PERSIST_INTERVAL: Duration = Duration::from_secs(3);
-const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(1);
+const PERSIST_INTERVAL: Duration = Duration::from_secs(10);
+const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(6);
 
 /// Persists changed documents after a fixed time interval.
-async fn persister(id: Identifier, rustpad: Arc<Rustpad>, state: Arc<ServerState>) {
-    let mut last_revision = 0;
-    while !rustpad.killed() {
-        let interval = PERSIST_INTERVAL + random_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
-        time::sleep(interval).await;
-        let revision = rustpad.revision().await;
+async fn persister(state: Arc<ServerState>) {
+    loop {
+        info!("checking for documents to persist...");
 
-        // TODO: only persist if there is any content!
-        // TODO: version history
-        // TODO: remove from memory after persisting, if no one edits, and reload on demand
-
-        if revision > last_revision {
-            info!("persisting revision {} for id = {}", revision, id);
-            if let Err(e) = state
-                .database
-                .store_document(&id, &rustpad.snapshot().await)
-                .await
-            {
-                error!("when persisting document {}: {}", id, e);
-            } else {
-                last_revision = revision;
+        let mut to_persist = Vec::new();
+        for entry in &state.documents {
+            let (id, value) = entry.pair();
+            if let Some(snapshot) = value.rustpad.dirty_snapshot().await {
+                to_persist.push((id.clone(), snapshot));
             }
         }
+
+        let mut jitter =
+            Duration::from_millis(random_range(0..PERSIST_INTERVAL_JITTER.as_millis() as u64));
+        if to_persist.is_empty() {
+            // Wait a bit longer if there are no documents to persist
+            jitter += PERSIST_INTERVAL;
+        }
+
+        // Persist documents outside of the loop to avoid holding locks while doing I/O
+        for (id, snapshot) in to_persist {
+            info!("persisting document {id}");
+            if let Err(e) = state.database.store_document(&id, &snapshot).await {
+                error!("Error persisting document {id}: {e:?}");
+            } else {
+                // Remove idle documents from memory
+                if let Entry::Occupied(e) = state.documents.entry(id.clone()) {
+                    if e.get().rustpad.kill_if_idle().await {
+                        info!("removing document {id} from memory");
+                        e.remove();
+                    }
+                }
+            }
+        }
+
+        while state.documents.is_empty() {
+            // If there are no documents, sleep until the next one is created to avoid unnecessary wakeups
+            state.notify_persister.notified().await;
+        }
+
+        time::sleep(PERSIST_INTERVAL + jitter).await;
     }
 }

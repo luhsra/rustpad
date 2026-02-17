@@ -13,12 +13,16 @@ async fn test_two_users() -> Result<()> {
     let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "foobar").await?;
-    assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert_eq!(
+        client.recv().await?,
+        json!({ "Identity": { "id": 0, "info": () } })
+    );
     assert!(client.recv().await?.get("Meta").is_some());
 
     let alice = json!({
         "name": "Alice",
         "hue": 42,
+        "admin": false,
     });
     client.send(&json!({ "ClientInfo": alice })).await;
 
@@ -26,19 +30,22 @@ async fn test_two_users() -> Result<()> {
         "UserInfo": {
             "id": 0,
             "info": alice,
-            "authenticated": false,
         }
     });
     assert_eq!(client.recv().await?, alice_info);
 
     let mut client2 = connect(&filter, "foobar").await?;
-    assert_eq!(client2.recv().await?, json!({ "Identity": 1 }));
+    assert_eq!(
+        client2.recv().await?,
+        json!({ "Identity": { "id": 1, "info": () } })
+    );
     assert!(client2.recv().await?.get("Meta").is_some());
     assert_eq!(client2.recv().await?, alice_info);
 
     let bob = json!({
         "name": "Bob",
         "hue": 96,
+        "admin": false,
     });
     client2.send(&json!({ "ClientInfo": bob })).await;
 
@@ -46,7 +53,6 @@ async fn test_two_users() -> Result<()> {
         "UserInfo": {
             "id": 1,
             "info": bob,
-            "authenticated": false,
         }
     });
     assert_eq!(client2.recv().await?, bob_info);
@@ -61,7 +67,10 @@ async fn test_invalid_user() -> Result<()> {
     let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "foobar").await?;
-    assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert_eq!(
+        client.recv().await?,
+        json!({ "Identity": { "id": 0, "info": () } })
+    );
     assert!(client.recv().await?.get("Meta").is_some());
 
     let alice = json!({ "name": "Alice" }); // no hue
@@ -77,12 +86,16 @@ async fn test_leave_rejoin() -> Result<()> {
     let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "foobar").await?;
-    assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert_eq!(
+        client.recv().await?,
+        json!({ "Identity": { "id": 0, "info": () } })
+    );
     assert!(client.recv().await?.get("Meta").is_some());
 
     let alice = json!({
         "name": "Alice",
         "hue": 42,
+        "admin": false,
     });
     client.send(&json!({ "ClientInfo": alice })).await;
 
@@ -90,7 +103,6 @@ async fn test_leave_rejoin() -> Result<()> {
         "UserInfo": {
             "id": 0,
             "info": alice,
-            "authenticated": false,
         }
     });
     assert_eq!(client.recv().await?, alice_info);
@@ -99,12 +111,16 @@ async fn test_leave_rejoin() -> Result<()> {
     client.recv_closed().await?;
 
     let mut client2 = connect(&filter, "foobar").await?;
-    assert_eq!(client2.recv().await?, json!({ "Identity": 1 }));
+    assert_eq!(
+        client2.recv().await?,
+        json!({ "Identity": { "id": 1, "info": () } })
+    );
     assert!(client2.recv().await?.get("Meta").is_some());
 
     let bob = json!({
         "name": "Bob",
         "hue": 96,
+        "admin": false,
     });
     client2.send(&json!({ "ClientInfo": bob })).await;
 
@@ -112,7 +128,6 @@ async fn test_leave_rejoin() -> Result<()> {
         "UserInfo": {
             "id": 1,
             "info": bob,
-            "authenticated": false,
         }
     });
     assert_eq!(client2.recv().await?, bob_info);
@@ -126,7 +141,10 @@ async fn test_cursors() -> Result<()> {
     let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "foobar").await?;
-    assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert_eq!(
+        client.recv().await?,
+        json!({ "Identity": { "id": 0, "info": () } })
+    );
     assert!(client.recv().await?.get("Meta").is_some());
 
     let cursors = json!({
@@ -144,7 +162,10 @@ async fn test_cursors() -> Result<()> {
     assert_eq!(client.recv().await?, cursors_resp);
 
     let mut client2 = connect(&filter, "foobar").await?;
-    assert_eq!(client2.recv().await?, json!({ "Identity": 1 }));
+    assert_eq!(
+        client2.recv().await?,
+        json!({ "Identity": { "id": 1, "info": () } })
+    );
     assert!(client2.recv().await?.get("Meta").is_some());
     assert_eq!(client2.recv().await?, cursors_resp);
 
@@ -175,7 +196,10 @@ async fn test_cursors() -> Result<()> {
     client2.send(&msg).await;
 
     let mut client3 = connect(&filter, "foobar").await?;
-    assert_eq!(client3.recv().await?, json!({ "Identity": 2 }));
+    assert_eq!(
+        client3.recv().await?,
+        json!({ "Identity": { "id": 2, "info": () } })
+    );
     assert!(client3.recv().await?.get("Meta").is_some());
     client3.recv().await?;
 

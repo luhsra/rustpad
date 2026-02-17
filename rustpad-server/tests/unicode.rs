@@ -6,7 +6,7 @@ use anyhow::Result;
 use common::*;
 use log::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{server, ServerConfig};
+use rustpad_server::{ServerConfig, server};
 use serde_json::json;
 
 #[tokio::test]
@@ -18,7 +18,7 @@ async fn test_unicode_length() -> Result<()> {
 
     let mut client = connect(&filter, "unicode").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
@@ -84,7 +84,7 @@ async fn test_multiple_operations() -> Result<()> {
 
     let mut client = connect(&filter, "unicode").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
@@ -177,7 +177,10 @@ async fn test_unicode_cursors() -> Result<()> {
     let filter = server(ServerConfig::temporary(1).await?);
 
     let mut client = connect(&filter, "unicode").await?;
-    assert_eq!(client.recv().await?, json!({ "Identity": 0 }));
+    assert_eq!(
+        client.recv().await?,
+        json!({ "Identity": { "id": 0, "info": () } })
+    );
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
@@ -207,7 +210,10 @@ async fn test_unicode_cursors() -> Result<()> {
     assert_eq!(client.recv().await?, cursors_resp);
 
     let mut client2 = connect(&filter, "unicode").await?;
-    assert_eq!(client2.recv().await?, json!({ "Identity": 1 }));
+    assert_eq!(
+        client2.recv().await?,
+        json!({ "Identity": { "id": 1, "info": () } })
+    );
     assert!(client2.recv().await?.get("Meta").is_some());
     client2.recv().await?;
     assert_eq!(client2.recv().await?, cursors_resp);
@@ -221,7 +227,10 @@ async fn test_unicode_cursors() -> Result<()> {
     client2.send(&msg).await;
 
     let mut client3 = connect(&filter, "unicode").await?;
-    assert_eq!(client3.recv().await?, json!({ "Identity": 2 }));
+    assert_eq!(
+        client3.recv().await?,
+        json!({ "Identity": { "id": 2, "info": () } })
+    );
     assert!(client3.recv().await?.get("Meta").is_some());
     client3.recv().await?;
 

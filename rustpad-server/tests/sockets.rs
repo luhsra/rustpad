@@ -6,7 +6,7 @@ use anyhow::Result;
 use common::*;
 use log::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{server, ServerConfig};
+use rustpad_server::{ServerConfig, server};
 use serde_json::json;
 use tokio::time;
 
@@ -21,7 +21,7 @@ async fn test_single_operation() -> Result<()> {
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
@@ -61,7 +61,7 @@ async fn test_invalid_operation() -> Result<()> {
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
@@ -87,7 +87,7 @@ async fn test_concurrent_transform() -> Result<()> {
     // Connect the first client
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     // Insert the first operation
@@ -147,7 +147,7 @@ async fn test_concurrent_transform() -> Result<()> {
     // Connect the second client
     let mut client2 = connect(&filter, "foobar").await?;
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 1 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 1, "info": () } }));
     assert!(client2.recv().await?.get("Meta").is_some(), "{msg}");
 
     // Insert a concurrent operation before seeing the existing history
@@ -207,28 +207,40 @@ async fn test_set_meta() -> Result<()> {
 
     let mut client = connect(&filter, "foobar").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let msg = json!({ "SetMeta": { "language": "javascript", "limited": false } });
     client.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "limited": false } }));
+    assert_eq!(
+        msg,
+        json!({ "Meta": { "language": "javascript", "limited": false } })
+    );
 
     let mut client2 = connect(&filter, "foobar").await?;
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 1 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 1, "info": () } }));
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "limited": false } }));
+    assert_eq!(
+        msg,
+        json!({ "Meta": { "language": "javascript", "limited": false } })
+    );
 
-    let msg = json!({ "SetMeta": { "language": "python", "limited": true } });
+    let msg = json!({ "SetMeta": { "language": "python", "limited": false } });
     client2.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "python", "limited": true } }));
+    assert_eq!(
+        msg,
+        json!({ "Meta": { "language": "python", "limited": false } })
+    );
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "python", "limited": true } }));
+    assert_eq!(
+        msg,
+        json!({ "Meta": { "language": "python", "limited": false } })
+    );
 
     expect_text(&filter, "foobar", "").await;
     Ok(())

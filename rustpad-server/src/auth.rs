@@ -13,7 +13,7 @@ use openidconnect::{
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, reqwest};
 use serde::{Deserialize, Serialize};
 use warp::reject::Rejection;
-use warp::reply::Reply;
+use warp::reply::{Reply, Response};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -150,11 +150,11 @@ pub struct LoginQuery {
 }
 
 pub async fn login(
-    auth: Arc<ServerState>,
+    state: Arc<ServerState>,
     session: Session,
     query: LoginQuery,
-) -> Result<impl Reply, Rejection> {
-    let auth = &auth.users;
+) -> Result<Response, Rejection> {
+    let auth = &state.users;
     let Some(openid) = &auth.openid else {
         return Err(warp::reject::custom(AuthError));
     };
@@ -191,9 +191,7 @@ pub async fn login(
     );
 
     // Redirect the user to the authorization URL.
-    Ok(warp::redirect(
-        auth_url.as_str().parse::<warp::http::Uri>().unwrap(),
-    ))
+    Ok(warp::redirect(auth_url.as_str().parse::<warp::http::Uri>().unwrap()).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,7 +204,7 @@ pub async fn authorized(
     state: Arc<ServerState>,
     session: Session,
     query: AuthorizedQuery,
-) -> Result<impl Reply, Rejection> {
+) -> Result<Response, Rejection> {
     let auth = &state.users;
     let err = |err: Option<&dyn std::error::Error>, message: &str| {
         error!("{message}: {err:?}");
@@ -337,16 +335,17 @@ pub async fn authorized(
             </body>
         </html>
         "#
-    )))
+    ))
+    .into_response())
 }
 
-pub async fn logout(state: Arc<ServerState>, session: Session) -> Result<impl Reply, Rejection> {
+pub async fn logout(state: Arc<ServerState>, session: Session) -> Result<Response, Rejection> {
     state.users.sessions.remove(&session);
     state.users.sessions.retain(|_, state| match state {
         AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
         AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
     });
-    Ok(warp::redirect("/".parse::<warp::http::Uri>().unwrap()))
+    Ok(warp::redirect("/".parse::<warp::http::Uri>().unwrap()).into_response())
 }
 
 #[derive(Debug, Deserialize, Serialize)]

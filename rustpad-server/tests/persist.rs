@@ -58,7 +58,7 @@ async fn test_persist() -> Result<()> {
 
     let mut client = connect(&filter, "persist").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();

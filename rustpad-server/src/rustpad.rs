@@ -34,6 +34,7 @@ struct State {
     meta: DocumentMeta,
     users: HashMap<u64, UserInfo>,
     cursors: HashMap<u64, CursorData>,
+    dirty: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -46,6 +47,7 @@ impl Default for State {
             },
             users: HashMap::new(),
             cursors: HashMap::new(),
+            dirty: false,
         }
     }
 }
@@ -69,6 +71,7 @@ struct UserOperation {
 pub struct UserInfo {
     pub name: String,
     pub hue: u16,
+    #[serde(default)]
     pub admin: bool,
 }
 
@@ -189,6 +192,50 @@ impl Rustpad {
     pub async fn revision(&self) -> usize {
         let state = self.state.read().await;
         state.operations.len()
+    }
+
+    // Returns the document if it has been modified since the last call to `dirty_snapshot`,
+    // and resets the dirty flag.
+    //
+    // Has to be done as one operation to avoid "lost wakeup".
+    pub async fn dirty_snapshot(&self) -> Option<PersistedDocument> {
+        let mut state = self.state.write().await;
+        if state.dirty {
+            state.dirty = false;
+            Some(PersistedDocument {
+                text: state.text.clone(),
+                meta: state.meta.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    // Returns the document if it has been modified since the last call to `dirty_snapshot`,
+    // and resets the dirty flag.
+    //
+    // Has to be done as one operation to avoid "lost wakeup".
+    pub fn dirty_snapshot_blocking(&self) -> Option<PersistedDocument> {
+        let mut state = self.state.blocking_write();
+        if state.dirty {
+            state.dirty = false;
+            Some(PersistedDocument {
+                text: state.text.clone(),
+                meta: state.meta.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    pub async fn kill_if_idle(&self) -> bool {
+        let state = self.state.read().await;
+        if state.users.is_empty() && !state.dirty {
+            self.kill();
+            true
+        } else {
+            false
+        }
     }
 
     /// Kill this object immediately, dropping all current connections.
@@ -340,6 +387,7 @@ impl Rustpad {
                     }
                 }
                 let limited = state.meta.limited;
+                state.dirty = true;
                 drop(state);
                 self.update.send(ServerMsg::Meta { language, limited }).ok();
             }
@@ -408,6 +456,7 @@ impl Rustpad {
         }
         state.operations.push(UserOperation { id, operation });
         state.text = new_text;
+        state.dirty = true;
         Ok(())
     }
 }

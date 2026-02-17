@@ -2,7 +2,7 @@ use std::{fmt, str::FromStr};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as base64engine;
-use log::{info, warn};
+use log::warn;
 use rand::random;
 use warp::{
     Filter,
@@ -74,11 +74,9 @@ impl<'de> serde::Deserialize<'de> for Identifier {
 pub struct Session([u8; 64]);
 impl Session {
     pub fn new() -> Self {
-        info!("creating new session");
         Self(random())
     }
     fn from_cookie(cookie: &str) -> Option<Self> {
-        info!("parsing session cookie: {}", cookie);
         let decoded = base64engine.decode(cookie).ok()?;
         let buf = decoded.try_into().ok()?;
         Some(Self(buf))

@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use common::*;
 use operational_transform::OperationSeq;
-use rustpad_server::{server, ServerConfig};
+use rustpad_server::{ServerConfig, server};
 use serde_json::json;
 use tokio::time;
 
@@ -22,7 +22,7 @@ async fn test_cleanup() -> Result<()> {
 
     let mut client = connect(&filter, "old").await?;
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Identity": 0 }));
+    assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(client.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();

@@ -31,8 +31,8 @@ impl PersistedDocument {
 /// Represents a user persisted in database storage.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PersistedUser {
-    /// Color of the user's editor cursor.
-    pub color: u16,
+    /// Hue of the user's editor cursor.
+    pub hue: u16,
     /// List of pinned documents by the user.
     pub pinned_documents: Vec<RecentDocument>,
     /// List of recently accessed documents by the user.
@@ -122,10 +122,8 @@ impl Database {
         let path = self.document_path_for(document_id);
         let meta_path = self.document_meta_path_for(document_id);
         let document = document.clone();
-        tokio::task::spawn_blocking(move || {
-            Self::store_document_blocking_raw(&path, &meta_path, &document)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || Self::store_document_raw(&path, &meta_path, &document))
+            .await??;
         Ok(())
     }
     pub fn store_document_blocking(
@@ -135,10 +133,10 @@ impl Database {
     ) -> Result<()> {
         let path = self.document_path_for(document_id);
         let meta_path = self.document_meta_path_for(document_id);
-        Self::store_document_blocking_raw(&path, &meta_path, document)?;
+        Self::store_document_raw(&path, &meta_path, document)?;
         Ok(())
     }
-    fn store_document_blocking_raw(
+    fn store_document_raw(
         path: &Path,
         meta_path: &Path,
         document: &PersistedDocument,
