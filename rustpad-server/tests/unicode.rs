@@ -2,24 +2,26 @@
 
 pub mod common;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use common::*;
-use log::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{ServerConfig, server};
+use rustpad_server::{ServerState, server};
 use serde_json::json;
+use tracing::info;
 
 #[tokio::test]
 async fn test_unicode_length() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "unicode", "").await;
+    client.expect_text("unicode", "").await;
 
-    let mut client = connect(&filter, "unicode").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("unicode").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("h🎉e🎉l👨‍👨‍👦‍👦lo");
@@ -30,9 +32,9 @@ async fn test_unicode_length() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -55,9 +57,9 @@ async fn test_unicode_length() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -70,22 +72,22 @@ async fn test_unicode_length() -> Result<()> {
         })
     );
 
-    expect_text(&filter, "unicode", "").await;
+    client.expect_text("unicode", "").await;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_multiple_operations() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "unicode", "").await;
+    client.expect_text("unicode", "").await;
 
-    let mut client = connect(&filter, "unicode").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("unicode").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("🎉😍𒀇👨‍👨‍👦‍👦"); // Emoticons and Cuneiform
@@ -96,9 +98,9 @@ async fn test_multiple_operations() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -123,9 +125,9 @@ async fn test_multiple_operations() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -138,7 +140,7 @@ async fn test_multiple_operations() -> Result<()> {
         })
     );
 
-    expect_text(&filter, "unicode", "👯‍♂️🎉😍𒀇𐅣𐅤𐅥👨‍👨‍👦‍👦").await;
+    client.expect_text("unicode", "👯‍♂️🎉😍𒀇𐅣𐅤𐅥👨‍👨‍👦‍👦").await;
 
     let mut operation = OperationSeq::default();
     operation.retain(2);
@@ -151,9 +153,9 @@ async fn test_multiple_operations() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -166,22 +168,24 @@ async fn test_multiple_operations() -> Result<()> {
         })
     );
 
-    expect_text(&filter, "unicode", "👯‍♂️🎉😍h̷̙̤̏͊̑̍̆̃̉͝ĕ̶̠̌̓̃̓̽̃̚l̸̥̊̓̓͝͠l̸̨̠̣̟̥͠ỏ̴̳̖̪̟̱̰̥̞̙̏̓́͗̽̀̈́͛͐̚̕͝͝ ̶̡͍͙͚̞͙̣̘͙̯͇̙̠̀w̷̨̨̪͚̤͙͖̝͕̜̭̯̝̋̋̿̿̀̾͛̐̏͘͘̕͝ǒ̴̙͉͈̗̖͍̘̥̤̒̈́̒͠r̶̨̡̢̦͔̙̮̦͖͔̩͈̗̖̂̀l̶̡̢͚̬̤͕̜̀͛̌̈́̈́͑͋̈̍̇͊͝͠ď̵̛̛̯͕̭̩͖̝̙͎̊̏̈́̎͊̐̏͊̕͜͝͠͝𒀇𐅣𐅤𐅥👨‍👨‍👦‍👦").await;
+    client
+        .expect_text("unicode", "👯‍♂️🎉😍h̷̙̤̏͊̑̍̆̃̉͝ĕ̶̠̌̓̃̓̽̃̚l̸̥̊̓̓͝͠l̸̨̠̣̟̥͠ỏ̴̳̖̪̟̱̰̥̞̙̏̓́͗̽̀̈́͛͐̚̕͝͝ ̶̡͍͙͚̞͙̣̘͙̯͇̙̠̀w̷̨̨̪͚̤͙͖̝͕̜̭̯̝̋̋̿̿̀̾͛̐̏͘͘̕͝ǒ̴̙͉͈̗̖͍̘̥̤̒̈́̒͠r̶̨̡̢̦͔̙̮̦͖͔̩͈̗̖̂̀l̶̡̢͚̬̤͕̜̀͛̌̈́̈́͑͋̈̍̇͊͝͠ď̵̛̛̯͕̭̩͖̝̙͎̊̏̈́̎͊̐̏͊̕͜͝͠͝𒀇𐅣𐅤𐅥👨‍👨‍👦‍👦")
+        .await;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_unicode_cursors() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "unicode").await?;
+    let mut socket = client.connect("unicode").await?;
     assert_eq!(
-        client.recv().await?,
+        socket.recv().await?,
         json!({ "Identity": { "id": 0, "info": () } })
     );
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("🎉🎉🎉");
@@ -192,14 +196,14 @@ async fn test_unicode_cursors() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
-    client.recv().await?;
+    socket.send(&msg).await;
+    socket.recv().await?;
 
     let cursors = json!({
         "cursors": [0, 1, 2, 3],
         "selections": [[0, 1], [2, 3]]
     });
-    client.send(&json!({ "CursorData": cursors })).await;
+    socket.send(&json!({ "CursorData": cursors })).await;
 
     let cursors_resp = json!({
         "UserCursor": {
@@ -207,16 +211,16 @@ async fn test_unicode_cursors() -> Result<()> {
             "data": cursors
         }
     });
-    assert_eq!(client.recv().await?, cursors_resp);
+    assert_eq!(socket.recv().await?, cursors_resp);
 
-    let mut client2 = connect(&filter, "unicode").await?;
+    let mut socket2 = client.connect("unicode").await?;
     assert_eq!(
-        client2.recv().await?,
+        socket2.recv().await?,
         json!({ "Identity": { "id": 1, "info": () } })
     );
-    assert!(client2.recv().await?.get("Meta").is_some());
-    client2.recv().await?;
-    assert_eq!(client2.recv().await?, cursors_resp);
+    assert!(socket2.recv().await?.get("Meta").is_some());
+    socket2.recv().await?;
+    assert_eq!(socket2.recv().await?, cursors_resp);
 
     let msg = json!({
         "Edit": {
@@ -224,15 +228,15 @@ async fn test_unicode_cursors() -> Result<()> {
             "operation": ["🎉"]
         }
     });
-    client2.send(&msg).await;
+    socket2.send(&msg).await;
 
-    let mut client3 = connect(&filter, "unicode").await?;
+    let mut socket3 = client.connect("unicode").await?;
     assert_eq!(
-        client3.recv().await?,
+        socket3.recv().await?,
         json!({ "Identity": { "id": 2, "info": () } })
     );
-    assert!(client3.recv().await?.get("Meta").is_some());
-    client3.recv().await?;
+    assert!(socket3.recv().await?.get("Meta").is_some());
+    socket3.recv().await?;
 
     let transformed_cursors_resp = json!({
         "UserCursor": {
@@ -243,7 +247,7 @@ async fn test_unicode_cursors() -> Result<()> {
             }
         }
     });
-    assert_eq!(client3.recv().await?, transformed_cursors_resp);
+    assert_eq!(socket3.recv().await?, transformed_cursors_resp);
 
     Ok(())
 }

@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
+use axum::extract::ws::{Message, WebSocket};
 use futures::prelude::*;
-use log::{info, warn};
 use operational_transform::OperationSeq;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock, broadcast};
-use warp::ws::{Message, WebSocket};
+use tracing::{info, warn};
 
 use crate::{database::PersistedDocument, ot::transform_index};
 
@@ -156,13 +156,15 @@ impl Rustpad {
         rustpad
     }
     /// Handle a connection from a WebSocket.
-    pub async fn on_connection(&self, socket: WebSocket, user: Option<UserInfo>) {
+    pub async fn on_connection(&self, mut socket: WebSocket, user: Option<UserInfo>) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
         info!("connection id={id}");
-        if let Err(e) = self.handle_connection(id, socket, user).await {
-            warn!("connection terminated early: {}", e);
+        if let Err(e) = self.handle_connection(id, &mut socket, user).await {
+            warn!("connection terminated early: {e}");
+            socket.close().await.ok();
         }
-        info!("disconnection, id = {}", id);
+        socket.close().await.ok();
+        info!("disconnection, id = {id}");
         {
             let mut state = self.state.write().await;
             state.users.remove(&id);
@@ -211,23 +213,6 @@ impl Rustpad {
         }
     }
 
-    // Returns the document if it has been modified since the last call to `dirty_snapshot`,
-    // and resets the dirty flag.
-    //
-    // Has to be done as one operation to avoid "lost wakeup".
-    pub fn dirty_snapshot_blocking(&self) -> Option<PersistedDocument> {
-        let mut state = self.state.blocking_write();
-        if state.dirty {
-            state.dirty = false;
-            Some(PersistedDocument {
-                text: state.text.clone(),
-                meta: state.meta.clone(),
-            })
-        } else {
-            None
-        }
-    }
-
     pub async fn kill_if_idle(&self) -> bool {
         let state = self.state.read().await;
         if state.users.is_empty() && !state.dirty {
@@ -252,12 +237,12 @@ impl Rustpad {
     async fn handle_connection(
         &self,
         id: u64,
-        mut socket: WebSocket,
+        socket: &mut WebSocket,
         user: Option<UserInfo>,
     ) -> Result<()> {
         let mut update_rx = self.update.subscribe();
 
-        let mut revision: usize = self.send_initial(id, &mut socket, user.clone()).await?;
+        let mut revision: usize = self.send_initial(id, socket, user.clone()).await?;
         let is_admin = user.as_ref().is_some_and(|u| u.admin);
 
         loop {
@@ -273,7 +258,7 @@ impl Rustpad {
                 break;
             }
             if self.revision().await > revision {
-                revision = self.send_history(revision, &mut socket).await?
+                revision = self.send_history(revision, socket).await?
             }
 
             tokio::select! {
@@ -291,7 +276,6 @@ impl Rustpad {
                 }
             }
         }
-
         Ok(())
     }
 
@@ -359,9 +343,9 @@ impl Rustpad {
         message: Message,
         user: &Option<UserInfo>,
     ) -> Result<()> {
-        let msg: ClientMsg = match message.to_str() {
+        let msg: ClientMsg = match message.to_text() {
             Ok(text) => serde_json::from_str(text).context("failed to deserialize message")?,
-            Err(()) => return Ok(()), // Ignore non-text messages
+            Err(_) => return Ok(()), // Ignore non-text messages
         };
         match msg {
             ClientMsg::Edit {
@@ -423,13 +407,6 @@ impl Rustpad {
         revision: usize,
         mut operation: OperationSeq,
     ) -> Result<()> {
-        info!(
-            "edit: id = {}, revision = {}, base_len = {}, target_len = {}",
-            id,
-            revision,
-            operation.base_len(),
-            operation.target_len()
-        );
         let mut state = self.state.write().await;
         let len = state.operations.len();
         if revision > len {

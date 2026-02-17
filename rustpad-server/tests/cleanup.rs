@@ -1,12 +1,12 @@
 #![cfg(test)]
 //! Tests to ensure that documents are garbage collected.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use common::*;
 use operational_transform::OperationSeq;
-use rustpad_server::{ServerConfig, server};
+use rustpad_server::{ServerState, server};
 use serde_json::json;
 use tokio::time;
 
@@ -15,15 +15,16 @@ pub mod common;
 #[ignore = "This is currently not supported"]
 #[tokio::test]
 async fn test_cleanup() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(2).await?);
+    logging();
+    let app = server(Arc::new(ServerState::temporary().await?));
+    let client = TestClient::start(app).await?;
 
-    expect_text(&filter, "old", "").await;
+    client.expect_text("old", "").await;
 
-    let mut client = connect(&filter, "old").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("old").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -33,20 +34,20 @@ async fn test_cleanup() -> Result<()> {
             "operation": operation
         }
     });
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     msg.get("History")
         .expect("should receive history operation");
-    expect_text(&filter, "old", "hello").await;
+    client.expect_text("old", "hello").await;
 
     let hour = Duration::from_secs(3600);
     time::pause();
     time::advance(47 * hour).await;
-    expect_text(&filter, "old", "hello").await;
+    client.expect_text("old", "hello").await;
 
     time::advance(3 * hour).await;
-    expect_text(&filter, "old", "").await;
+    client.expect_text("old", "").await;
 
     Ok(())
 }

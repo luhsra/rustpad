@@ -1,16 +1,42 @@
-use std::{fmt, str::FromStr};
+use std::{convert::Infallible, fmt, str::FromStr};
 
+use axum::{
+    RequestPartsExt,
+    extract::{FromRequestParts, OptionalFromRequestParts},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header, request::Parts},
+    response::{IntoResponse, Redirect, Response},
+};
+use axum_extra::{TypedHeader, headers, typed_header::TypedHeaderRejectionReason};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as base64engine;
-use log::warn;
+use tracing::{error, info, warn};
 use rand::random;
-use warp::{
-    Filter,
-    reject::Rejection,
-    reply::{Reply, Response},
-};
 
 use crate::auth::LOGGEDIN_EXPIRE_SEC;
+
+// Use anyhow, define error and enable '?'
+// For a simplified example of using anyhow in axum check /examples/anyhow-error-response
+#[derive(Debug)]
+pub struct AppError(pub anyhow::Error);
+
+// Tell axum how to convert `AppError` into a response.
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        error!("Application error: {:#}", self.0);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong").into_response()
+    }
+}
+
+// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// `Result<_, AppError>`. That way you don't need to do that manually.
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
+    }
+}
 
 const SESSION_COOKIE: &str = "rustpad_session";
 
@@ -77,6 +103,7 @@ impl Session {
         Self(random())
     }
     fn from_cookie(cookie: &str) -> Option<Self> {
+        info!("parsing session cookie: {cookie}");
         let decoded = base64engine.decode(cookie).ok()?;
         let buf = decoded.try_into().ok()?;
         Some(Self(buf))
@@ -86,6 +113,19 @@ impl Session {
             "{SESSION_COOKIE}={self}; Path=/; HttpOnly; Age={LOGGEDIN_EXPIRE_SEC}; SameSite=Lax"
         )
     }
+    fn change_cookie(&self, cookie: HeaderValue, reply: impl IntoResponse) -> impl IntoResponse {
+        let headers = HeaderMap::from_iter([(HeaderName::from_static("set-cookie"), cookie)]);
+        (headers, reply)
+    }
+    pub fn set_cookie(&self, reply: impl IntoResponse) -> impl IntoResponse {
+        self.change_cookie(self.to_cookie().parse().unwrap(), reply)
+    }
+    pub fn delete_cookie(&self, reply: impl IntoResponse) -> impl IntoResponse {
+        let cookie = format!(
+            "{SESSION_COOKIE}=deleted; Path=/; HttpOnly; Expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax"
+        );
+        self.change_cookie(cookie.parse().unwrap(), reply)
+    }
 }
 impl fmt::Display for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -93,39 +133,53 @@ impl fmt::Display for Session {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SessionState {
-    pub session: Session,
-    pub new: bool,
+pub struct AuthRedirect;
+
+impl IntoResponse for AuthRedirect {
+    fn into_response(self) -> Response {
+        Redirect::temporary("/auth/discord").into_response()
+    }
 }
-impl SessionState {
-    pub fn new(session_opt: Option<String>) -> Self {
-        if let Some(cookie) = session_opt
-            && let Some(session) = Session::from_cookie(&cookie)
-        {
-            Self {
-                session,
-                new: false,
+
+impl<S> OptionalFromRequestParts<S> for Session
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        let cookies = match parts.extract::<TypedHeader<headers::Cookie>>().await {
+            Ok(cookie) => cookie,
+            Err(e) => {
+                match *e.name() {
+                    header::COOKIE => match e.reason() {
+                        TypedHeaderRejectionReason::Missing => (),
+                        _ => error!("unexpected error getting Cookie header(s): {e}"),
+                    },
+                    _ => error!("unexpected error getting cookies: {e}"),
+                };
+                return Ok(None);
             }
-        } else {
-            warn!("No valid session cookie found, creating new session");
-            Self {
-                session: Session::new(),
-                new: true,
-            }
-        }
+        };
+        Ok(cookies.get(SESSION_COOKIE).and_then(Session::from_cookie))
     }
-    pub fn filter() -> impl Filter<Extract = (Self,), Error = Rejection> + Clone {
-        warp::filters::cookie::optional(SESSION_COOKIE)
-            .map(Self::new)
-            .boxed()
-    }
-    pub fn attach_reply<R: Reply>(self, reply: R) -> Response {
-        if self.new {
-            let header = self.session.to_cookie();
-            warp::reply::with_header(reply, "set-cookie", header).into_response()
-        } else {
-            reply.into_response()
-        }
+}
+
+impl<S> FromRequestParts<S> for Session
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthRedirect;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        warn!("extracting session from request...");
+        <Self as OptionalFromRequestParts<S>>::from_request_parts(parts, state)
+            .await
+            .ok()
+            .flatten()
+            .ok_or(AuthRedirect)
     }
 }

@@ -1,30 +1,32 @@
 //! Tests for synchronization of user presence.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use common::*;
-use rustpad_server::{ServerConfig, server};
+use rustpad_server::{ServerState, server};
 use serde_json::json;
 
 pub mod common;
 
 #[tokio::test]
 async fn test_two_users() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut socket = client.connect("foobar").await?;
     assert_eq!(
-        client.recv().await?,
+        socket.recv().await?,
         json!({ "Identity": { "id": 0, "info": () } })
     );
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let alice = json!({
         "name": "Alice",
         "hue": 42,
         "admin": false,
     });
-    client.send(&json!({ "ClientInfo": alice })).await;
+    socket.send(&json!({ "ClientInfo": alice })).await;
 
     let alice_info = json!({
         "UserInfo": {
@@ -32,22 +34,22 @@ async fn test_two_users() -> Result<()> {
             "info": alice,
         }
     });
-    assert_eq!(client.recv().await?, alice_info);
+    assert_eq!(socket.recv().await?, alice_info);
 
-    let mut client2 = connect(&filter, "foobar").await?;
+    let mut socket2 = client.connect("foobar").await?;
     assert_eq!(
-        client2.recv().await?,
+        socket2.recv().await?,
         json!({ "Identity": { "id": 1, "info": () } })
     );
-    assert!(client2.recv().await?.get("Meta").is_some());
-    assert_eq!(client2.recv().await?, alice_info);
+    assert!(socket2.recv().await?.get("Meta").is_some());
+    assert_eq!(socket2.recv().await?, alice_info);
 
     let bob = json!({
         "name": "Bob",
         "hue": 96,
         "admin": false,
     });
-    client2.send(&json!({ "ClientInfo": bob })).await;
+    socket2.send(&json!({ "ClientInfo": bob })).await;
 
     let bob_info = json!({
         "UserInfo": {
@@ -55,49 +57,49 @@ async fn test_two_users() -> Result<()> {
             "info": bob,
         }
     });
-    assert_eq!(client2.recv().await?, bob_info);
-    assert_eq!(client.recv().await?, bob_info);
+    assert_eq!(socket2.recv().await?, bob_info);
+    assert_eq!(socket.recv().await?, bob_info);
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_invalid_user() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut socket = client.connect("foobar").await?;
     assert_eq!(
-        client.recv().await?,
+        socket.recv().await?,
         json!({ "Identity": { "id": 0, "info": () } })
     );
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let alice = json!({ "name": "Alice" }); // no hue
-    client.send(&json!({ "ClientInfo": alice })).await;
-    client.recv_closed().await?;
+    socket.send(&json!({ "ClientInfo": alice })).await;
+    socket.recv_closed().await?;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_leave_rejoin() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut socket = client.connect("foobar").await?;
     assert_eq!(
-        client.recv().await?,
+        socket.recv().await?,
         json!({ "Identity": { "id": 0, "info": () } })
     );
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let alice = json!({
         "name": "Alice",
         "hue": 42,
         "admin": false,
     });
-    client.send(&json!({ "ClientInfo": alice })).await;
+    socket.send(&json!({ "ClientInfo": alice })).await;
 
     let alice_info = json!({
         "UserInfo": {
@@ -105,24 +107,24 @@ async fn test_leave_rejoin() -> Result<()> {
             "info": alice,
         }
     });
-    assert_eq!(client.recv().await?, alice_info);
+    assert_eq!(socket.recv().await?, alice_info);
 
-    client.send(&json!({ "Invalid": "please close" })).await;
-    client.recv_closed().await?;
+    socket.send(&json!({ "Invalid": "please close" })).await;
+    socket.recv_closed().await?;
 
-    let mut client2 = connect(&filter, "foobar").await?;
+    let mut socket2 = client.connect("foobar").await?;
     assert_eq!(
-        client2.recv().await?,
+        socket2.recv().await?,
         json!({ "Identity": { "id": 1, "info": () } })
     );
-    assert!(client2.recv().await?.get("Meta").is_some());
+    assert!(socket2.recv().await?.get("Meta").is_some());
 
     let bob = json!({
         "name": "Bob",
         "hue": 96,
         "admin": false,
     });
-    client2.send(&json!({ "ClientInfo": bob })).await;
+    socket2.send(&json!({ "ClientInfo": bob })).await;
 
     let bob_info = json!({
         "UserInfo": {
@@ -130,28 +132,28 @@ async fn test_leave_rejoin() -> Result<()> {
             "info": bob,
         }
     });
-    assert_eq!(client2.recv().await?, bob_info);
+    assert_eq!(socket2.recv().await?, bob_info);
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_cursors() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "foobar").await?;
+    let mut socket = client.connect("foobar").await?;
     assert_eq!(
-        client.recv().await?,
+        socket.recv().await?,
         json!({ "Identity": { "id": 0, "info": () } })
     );
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let cursors = json!({
         "cursors": [4, 6, 7],
         "selections": [[5, 10], [3, 4]]
     });
-    client.send(&json!({ "CursorData": cursors })).await;
+    socket.send(&json!({ "CursorData": cursors })).await;
 
     let cursors_resp = json!({
         "UserCursor": {
@@ -159,21 +161,21 @@ async fn test_cursors() -> Result<()> {
             "data": cursors
         }
     });
-    assert_eq!(client.recv().await?, cursors_resp);
+    assert_eq!(socket.recv().await?, cursors_resp);
 
-    let mut client2 = connect(&filter, "foobar").await?;
+    let mut socket2 = client.connect("foobar").await?;
     assert_eq!(
-        client2.recv().await?,
+        socket2.recv().await?,
         json!({ "Identity": { "id": 1, "info": () } })
     );
-    assert!(client2.recv().await?.get("Meta").is_some());
-    assert_eq!(client2.recv().await?, cursors_resp);
+    assert!(socket2.recv().await?.get("Meta").is_some());
+    assert_eq!(socket2.recv().await?, cursors_resp);
 
     let cursors2 = json!({
         "cursors": [10],
         "selections": []
     });
-    client2.send(&json!({ "CursorData": cursors2 })).await;
+    socket2.send(&json!({ "CursorData": cursors2 })).await;
 
     let cursors2_resp = json!({
         "UserCursor": {
@@ -181,11 +183,11 @@ async fn test_cursors() -> Result<()> {
             "data": cursors2
         }
     });
-    assert_eq!(client2.recv().await?, cursors2_resp);
-    assert_eq!(client.recv().await?, cursors2_resp);
+    assert_eq!(socket2.recv().await?, cursors2_resp);
+    assert_eq!(socket.recv().await?, cursors2_resp);
 
-    client.send(&json!({ "Invalid": "please close" })).await;
-    client.recv_closed().await?;
+    socket.send(&json!({ "Invalid": "please close" })).await;
+    socket.recv_closed().await?;
 
     let msg = json!({
         "Edit": {
@@ -193,15 +195,15 @@ async fn test_cursors() -> Result<()> {
             "operation": ["a"]
         }
     });
-    client2.send(&msg).await;
+    socket2.send(&msg).await;
 
-    let mut client3 = connect(&filter, "foobar").await?;
+    let mut socket3 = client.connect("foobar").await?;
     assert_eq!(
-        client3.recv().await?,
+        socket3.recv().await?,
         json!({ "Identity": { "id": 2, "info": () } })
     );
-    assert!(client3.recv().await?.get("Meta").is_some());
-    client3.recv().await?;
+    assert!(socket3.recv().await?.get("Meta").is_some());
+    socket3.recv().await?;
 
     let transformed_cursors2_resp = json!({
         "UserCursor": {
@@ -212,7 +214,7 @@ async fn test_cursors() -> Result<()> {
             }
         }
     });
-    assert_eq!(client3.recv().await?, transformed_cursors2_resp);
+    assert_eq!(socket3.recv().await?, transformed_cursors2_resp);
 
     Ok(())
 }

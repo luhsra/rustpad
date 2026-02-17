@@ -1,12 +1,12 @@
 //! Basic tests for real-time collaboration.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use common::*;
-use log::info;
+use tracing::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{ServerConfig, server};
+use rustpad_server::{ServerState, server};
 use serde_json::json;
 use tokio::time;
 
@@ -14,15 +14,15 @@ pub mod common;
 
 #[tokio::test]
 async fn test_single_operation() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "foobar", "").await;
+    client.expect_text("foobar", "").await;
 
-    let mut client = connect(&filter, "foobar").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("foobar").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -33,9 +33,9 @@ async fn test_single_operation() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -48,21 +48,21 @@ async fn test_single_operation() -> Result<()> {
         })
     );
 
-    expect_text(&filter, "foobar", "hello").await;
+    client.expect_text("foobar", "hello").await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_invalid_operation() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "foobar", "").await;
+    client.expect_text("foobar", "").await;
 
-    let mut client = connect(&filter, "foobar").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("foobar").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -73,22 +73,22 @@ async fn test_invalid_operation() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    client.recv_closed().await?;
+    socket.recv_closed().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_concurrent_transform() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
     // Connect the first client
-    let mut client = connect(&filter, "foobar").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("foobar").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     // Insert the first operation
     let mut operation = OperationSeq::default();
@@ -100,9 +100,9 @@ async fn test_concurrent_transform() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -128,9 +128,9 @@ async fn test_concurrent_transform() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -142,13 +142,13 @@ async fn test_concurrent_transform() -> Result<()> {
             }
         })
     );
-    expect_text(&filter, "foobar", "henlo").await;
+    client.expect_text("foobar", "henlo").await;
 
     // Connect the second client
-    let mut client2 = connect(&filter, "foobar").await?;
-    let msg = client2.recv().await?;
+    let mut socket2 = client.connect("foobar").await?;
+    let msg = socket2.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 1, "info": () } }));
-    assert!(client2.recv().await?.get("Meta").is_some(), "{msg}");
+    assert!(socket2.recv().await?.get("Meta").is_some(), "{msg}");
 
     // Insert a concurrent operation before seeing the existing history
     time::sleep(Duration::from_millis(50)).await;
@@ -161,10 +161,10 @@ async fn test_concurrent_transform() -> Result<()> {
         }
     });
     info!("sending ClientMsg {}", msg);
-    client2.send(&msg).await;
+    socket2.send(&msg).await;
 
     // Receive the existing history
-    let msg = client2.recv().await?;
+    let msg = socket2.recv().await?;
     assert_eq!(
         msg,
         json!({
@@ -189,59 +189,59 @@ async fn test_concurrent_transform() -> Result<()> {
     });
 
     // ... in the first client
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, transformed_op);
 
     // ... and in the second client
-    let msg = client2.recv().await?;
+    let msg = socket2.recv().await?;
     assert_eq!(msg, transformed_op);
 
-    expect_text(&filter, "foobar", "~rust~henlo").await;
+    client.expect_text("foobar", "~rust~henlo").await;
     Ok(())
 }
 
 #[tokio::test]
 async fn test_set_meta() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    let mut client = connect(&filter, "foobar").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("foobar").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let msg = json!({ "SetMeta": { "language": "javascript", "limited": false } });
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({ "Meta": { "language": "javascript", "limited": false } })
     );
 
-    let mut client2 = connect(&filter, "foobar").await?;
-    let msg = client2.recv().await?;
+    let mut socket2 = client.connect("foobar").await?;
+    let msg = socket2.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 1, "info": () } }));
-    let msg = client2.recv().await?;
+    let msg = socket2.recv().await?;
     assert_eq!(
         msg,
         json!({ "Meta": { "language": "javascript", "limited": false } })
     );
 
     let msg = json!({ "SetMeta": { "language": "python", "limited": false } });
-    client2.send(&msg).await;
+    socket2.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     assert_eq!(
         msg,
         json!({ "Meta": { "language": "python", "limited": false } })
     );
-    let msg = client2.recv().await?;
+    let msg = socket2.recv().await?;
     assert_eq!(
         msg,
         json!({ "Meta": { "language": "python", "limited": false } })
     );
 
-    expect_text(&filter, "foobar", "").await;
+    client.expect_text("foobar", "").await;
     Ok(())
 }

@@ -41,6 +41,10 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   let icon = info.admin ? VscWorkspaceTrusted : VscWorkspaceUnknown;
   let name = info.admin ? info.name : ("Anon " + info.name);
 
+  let query = new URLSearchParams({ location: location.hash.slice(1) });
+  let login_url = "/auth/login?" + query.toString();
+  let logout_url = "/auth/logout?" + query.toString();
+
   return (
     <Popover.Root initialFocusEl={() => inputRef.current}>
       <Popover.Trigger asChild>
@@ -69,11 +73,11 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
                 <FaPalette /> Change Color
               </Button>
               {info.admin ? (
-                <Button mt={2} size="sm" w="100%" colorPalette="red" onClick={() => (location.href = "/api/logout")}>
+                <Button mt={2} size="sm" w="100%" colorPalette="red" onClick={() => (location.href = logout_url)}>
                   Logout
                 </Button>
               ) : (
-                <Button mt={2} size="sm" w="100%" colorPalette="green" onClick={() => (location.href = "/api/login?redirect=" + encodeURIComponent(location.hash.slice(1)))}>
+                <Button mt={2} size="sm" w="100%" colorPalette="green" onClick={() => (location.href = login_url)}>
                   Login
                 </Button>
               )}

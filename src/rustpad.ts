@@ -177,6 +177,7 @@ class Rustpad {
   private handleMessage(msg: ServerMsg) {
     console.debug("received message", msg);
     if (msg.Identity !== undefined) {
+      console.info("received identity", msg.Identity);
       this.me = msg.Identity.id;
       this.myInfo = msg.Identity.info;
       this.options.onConnected?.(this.myInfo);

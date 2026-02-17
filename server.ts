@@ -1,7 +1,9 @@
 import { serve } from "bun";
 import index from "./index.html";
 
-const PROXY_TARGET = "http://localhost:3030";
+const PROXY_TARGET = "localhost:3030";
+const HTTP_TARGET = "http://" + PROXY_TARGET;
+const WS_TARGET = "ws://" + PROXY_TARGET;
 
 const server = serve({
     routes: {
@@ -12,16 +14,11 @@ const server = serve({
             // Check for WebSocket upgrade
             if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') {
                 // Pass the URL and other request info to the WebSocket handler
-                server.upgrade(req, {
-                    data: {
-                        url: url,
-                        backend: undefined,
-                    }
-                });
+                server.upgrade(req, { data: { url: url, backend: undefined } });
                 return undefined; // Must return undefined after successful upgrade
             }
 
-            const backendUrl = new URL(url.pathname, PROXY_TARGET);
+            const backendUrl = new URL(url.pathname, HTTP_TARGET);
             return fetch(backendUrl, {
                 method: req.method,
                 headers: req.headers,
@@ -40,7 +37,7 @@ const server = serve({
 
             // Now you can use it to construct the backend WebSocket URL
             const path = ws.data.url.pathname;
-            const backendUrl = new URL(path, PROXY_TARGET);
+            const backendUrl = new URL(path, WS_TARGET);
             const backend = new WebSocket(backendUrl);
 
             ws.data.backend = backend;

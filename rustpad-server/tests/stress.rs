@@ -1,12 +1,12 @@
 //! Stress tests for liveness and consistency properties.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
 use common::*;
-use log::info;
+use tracing::info;
 use operational_transform::OperationSeq;
-use rustpad_server::{ServerConfig, server};
+use rustpad_server::{ServerState, server};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
@@ -14,20 +14,20 @@ pub mod common;
 
 #[tokio::test]
 async fn test_lost_wakeups() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "stress", "").await;
+    client.expect_text("stress", "").await;
 
-    let mut client = connect(&filter, "stress").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("stress").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
-    let mut client2 = connect(&filter, "stress").await?;
-    let msg = client2.recv().await?;
+    let mut socket2 = client.connect("stress").await?;
+    let msg = socket2.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 1, "info": () } }));
-    assert!(client2.recv().await?.get("Meta").is_some());
+    assert!(socket2.recv().await?.get("Meta").is_some());
 
     let mut revision = 0;
     for i in 0..100 {
@@ -42,7 +42,7 @@ async fn test_lost_wakeups() -> Result<()> {
                     "operation": operation
                 }
             });
-            client.send(&msg).await;
+            socket.send(&msg).await;
             revision += 1;
         }
 
@@ -54,13 +54,13 @@ async fn test_lost_wakeups() -> Result<()> {
 
         let mut total = 0;
         while total < num_edits {
-            let msg = client.recv().await?;
+            let msg = socket.recv().await?;
             total += num_ops(&msg).ok_or_else(|| anyhow!("missing json key"))?;
         }
 
         let mut total2 = 0;
         while total2 < num_edits {
-            let msg = client2.recv().await?;
+            let msg = socket2.recv().await?;
             total2 += num_ops(&msg).ok_or_else(|| anyhow!("missing json key"))?;
         }
 
@@ -68,22 +68,24 @@ async fn test_lost_wakeups() -> Result<()> {
         assert!(start.elapsed() <= Duration::from_millis(200));
     }
 
-    expect_text(&filter, "stress", &"a".repeat(revision as usize)).await;
+    client
+        .expect_text("stress", &"a".repeat(revision as usize))
+        .await;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn test_large_document() -> Result<()> {
-    pretty_env_logger::try_init().ok();
-    let filter = server(ServerConfig::temporary(1).await?);
+    logging();
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "stress", "").await;
+    client.expect_text("stress", "").await;
 
-    let mut client = connect(&filter, "stress").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("stress").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert(&"a".repeat(5000));
@@ -93,8 +95,8 @@ async fn test_large_document() -> Result<()> {
             "operation": operation
         }
     });
-    client.send(&msg).await;
-    client.recv().await?;
+    socket.send(&msg).await;
+    socket.recv().await?;
 
     let mut operation = OperationSeq::default();
     operation.insert(&"a".repeat(500000));
@@ -104,8 +106,8 @@ async fn test_large_document() -> Result<()> {
             "operation": operation
         }
     });
-    client.send(&msg).await;
-    client.recv_closed().await?;
+    socket.send(&msg).await;
+    socket.recv_closed().await?;
 
     Ok(())
 }

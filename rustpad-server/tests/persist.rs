@@ -1,12 +1,12 @@
 //! Tests to ensure that documents are persisted with SQLite.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use common::*;
 use operational_transform::OperationSeq;
 use rustpad_server::{
-    ServerConfig,
+    ServerState,
     database::{Database, PersistedDocument},
     server,
 };
@@ -17,7 +17,7 @@ pub mod common;
 
 #[tokio::test]
 async fn test_database() -> Result<()> {
-    pretty_env_logger::try_init().ok();
+    logging();
 
     let database = Database::temporary().await?;
 
@@ -46,20 +46,16 @@ async fn test_database() -> Result<()> {
 
 #[tokio::test]
 async fn test_persist() -> Result<()> {
-    pretty_env_logger::try_init().ok();
+    logging();
 
-    let filter = server(ServerConfig {
-        expiry_days: 2,
-        database: Database::temporary().await?,
-        openid: None,
-    });
+    let client = TestClient::start(server(Arc::new(ServerState::temporary().await?))).await?;
 
-    expect_text(&filter, "persist", "").await;
+    client.expect_text("persist", "").await;
 
-    let mut client = connect(&filter, "persist").await?;
-    let msg = client.recv().await?;
+    let mut socket = client.connect("persist").await?;
+    let msg = socket.recv().await?;
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
-    assert!(client.recv().await?.get("Meta").is_some());
+    assert!(socket.recv().await?.get("Meta").is_some());
 
     let mut operation = OperationSeq::default();
     operation.insert("hello");
@@ -69,17 +65,17 @@ async fn test_persist() -> Result<()> {
             "operation": operation
         }
     });
-    client.send(&msg).await;
+    socket.send(&msg).await;
 
-    let msg = client.recv().await?;
+    let msg = socket.recv().await?;
     msg.get("History")
         .expect("should receive history operation");
-    expect_text(&filter, "persist", "hello").await;
+    client.expect_text("persist", "hello").await;
 
     let hour = Duration::from_secs(3600);
     time::pause();
     time::advance(47 * hour).await;
-    expect_text(&filter, "persist", "hello").await;
+    client.expect_text("persist", "hello").await;
 
     // Give SQLite some time to actually update the database.
     time::resume();
@@ -87,7 +83,7 @@ async fn test_persist() -> Result<()> {
     time::pause();
 
     time::advance(3 * hour).await;
-    expect_text(&filter, "persist", "hello").await;
+    client.expect_text("persist", "hello").await;
 
     Ok(())
 }

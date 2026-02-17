@@ -1,6 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use axum::Router;
+use axum::extract::{Query, State};
+use axum::response::{Html, IntoResponse, Redirect};
+use axum::routing::get;
 use dashmap::DashMap;
-use log::{error, info};
 use openidconnect::core::{
     CoreAuthenticationFlow, CoreClient, CoreGenderClaim, CoreIdTokenClaims, CoreIdTokenVerifier,
     CoreProviderMetadata,
@@ -12,24 +15,18 @@ use openidconnect::{
 };
 use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, reqwest};
 use serde::{Deserialize, Serialize};
-use warp::reject::Rejection;
-use warp::reply::{Reply, Response};
+use tracing::{error, info};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::ServerState;
 use crate::rustpad::UserInfo;
-use crate::util::{Identifier, Session};
+use crate::util::{AppError, Identifier, Session};
 
 /// Time after which a login attempt expires if not completed.
 const LOGINGIN_EXPIRE_SEC: u64 = 15 * 60;
 /// Time after which a logged in session expires.
 pub const LOGGEDIN_EXPIRE_SEC: u64 = 2 * 24 * 60 * 60;
-
-#[derive(Debug)]
-struct AuthError;
-impl warp::reject::Reject for AuthError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -72,12 +69,7 @@ enum AuthState {
 
 #[derive(Debug)]
 pub struct UserSessions {
-    openid: Option<OpenIdState>,
     sessions: DashMap<Session, AuthState>,
-}
-
-#[derive(Debug)]
-pub struct OpenIdState {
     client: CoreClient<
         EndpointSet,      // AuthUrl
         EndpointNotSet,   // DeviceAuthUrl
@@ -89,7 +81,8 @@ pub struct OpenIdState {
     http_client: reqwest::Client,
     admin_group: String,
 }
-impl OpenIdState {
+
+impl UserSessions {
     pub async fn new(config: OpenIdConfig) -> Result<Self> {
         let issuer_url = IssuerUrl::new(config.issuer_url).context("Invalid issuer URL")?;
 
@@ -104,7 +97,7 @@ impl OpenIdState {
             .await
             .context("Failed to discover OpenID Provider")?;
 
-        let redirect_url = RedirectUrl::new(config.host_url + "/api/authorized")
+        let redirect_url = RedirectUrl::new(config.host_url + "/auth/authorized")
             .context("Invalid redirect URL")?;
 
         // Set up the config for the GitLab OAuth2 process.
@@ -119,16 +112,8 @@ impl OpenIdState {
             client,
             http_client,
             admin_group: config.admin_group,
-        })
-    }
-}
-
-impl UserSessions {
-    pub fn new(openid: Option<OpenIdState>) -> Self {
-        Self {
-            openid,
             sessions: DashMap::new(),
-        }
+        })
     }
 
     pub async fn get_user(&self, session: &Session) -> Option<User> {
@@ -144,22 +129,32 @@ impl UserSessions {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LoginQuery {
+pub fn routes(users: Option<Arc<UserSessions>>) -> Router {
+    if let Some(users) = users {
+        Router::new()
+            .route("/login", get(login))
+            .route("/authorized", get(authorized))
+            .route("/logout", get(logout))
+            .with_state(users)
+    } else {
+        Router::new()
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct RedirectQuery {
     pub redirect: Option<Identifier>,
 }
 
 pub async fn login(
-    state: Arc<ServerState>,
-    session: Session,
-    query: LoginQuery,
-) -> Result<Response, Rejection> {
-    let auth = &state.users;
-    let Some(openid) = &auth.openid else {
-        return Err(warp::reject::custom(AuthError));
-    };
+    State(users): State<Arc<UserSessions>>,
+    Query(query): Query<RedirectQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let session = Session::new();
+
     // Generate the full authorization URL.
-    let (auth_url, csrf_token, nonce) = openid
+    let (auth_url, csrf_token, nonce) = users
         .client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
@@ -174,14 +169,17 @@ pub async fn login(
 
     // Store the CSRF token and nonce in the logins map with an expiration time.
     let expires_at = Instant::now() + Duration::from_secs(LOGINGIN_EXPIRE_SEC);
-    auth.sessions.retain(|_, state| match state {
+    users.sessions.retain(|_, state| match state {
         AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
         AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
     });
 
-    info!("Starting login for session {session}, redirecting to {auth_url}",);
-    auth.sessions.insert(
-        session,
+    info!(
+        "Login {session}: -> {}",
+        auth_url.domain().unwrap_or_default()
+    );
+    users.sessions.insert(
+        session.clone(),
         AuthState::LoggingIn {
             csrf_token,
             nonce,
@@ -191,7 +189,9 @@ pub async fn login(
     );
 
     // Redirect the user to the authorization URL.
-    Ok(warp::redirect(auth_url.as_str().parse::<warp::http::Uri>().unwrap()).into_response())
+    Ok(session
+        .set_cookie(Redirect::to(auth_url.as_str()))
+        .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,29 +201,21 @@ pub struct AuthorizedQuery {
 }
 
 pub async fn authorized(
-    state: Arc<ServerState>,
+    State(users): State<Arc<UserSessions>>,
     session: Session,
-    query: AuthorizedQuery,
-) -> Result<Response, Rejection> {
-    let auth = &state.users;
+    Query(query): Query<AuthorizedQuery>,
+) -> Result<impl IntoResponse, AppError> {
     let err = |err: Option<&dyn std::error::Error>, message: &str| {
         error!("{message}: {err:?}");
-        auth.sessions.remove(&session);
-        warp::reject::custom(AuthError)
+        AppError(anyhow!("{message}: {err:?}"))
     };
 
     let AuthorizedQuery { code, state } = query;
-    info!(
-        "Received authorization code: {code:?}, state: {state:?} for session {:?}",
-        session
-    );
-    let Some(openid) = &auth.openid else {
-        return Err(err(None, "OpenID Connect is not configured"));
-    };
+    info!("Authorize {session}");
 
-    let mut login_state = auth
+    let (_, login_state) = users
         .sessions
-        .get_mut(&session)
+        .remove(&session)
         .ok_or_else(|| err(None, "No login state found for session"))?;
 
     let AuthState::LoggingIn {
@@ -231,31 +223,31 @@ pub async fn authorized(
         nonce,
         expires_at,
         redirect,
-    } = &*login_state
+    } = login_state
     else {
-        return Err(warp::reject::custom(AuthError));
+        return Err(err(None, "Session is not in logging in state"));
     };
 
-    if *expires_at < Instant::now() {
+    if expires_at < Instant::now() {
         return Err(err(None, "Login attempt expired"));
     }
 
     // Timing attack safe comparison (expensive but safe)
-    if csrf_token != &state {
+    if csrf_token != state {
         return Err(err(None, "Invalid CSRF token"));
     }
 
     // Now you can exchange it for an access token and ID token.
-    let token_response = openid
+    let token_response = users
         .client
         .exchange_code(code)
         .map_err(|e| err(Some(&e), "Failed to exchange code for token"))?
-        .request_async(&openid.http_client)
+        .request_async(&users.http_client)
         .await
         .map_err(|e| err(Some(&e), "Failed to contact token endpoint"))?;
 
     // Extract the claims from the token response.
-    let id_token_verifier: CoreIdTokenVerifier = openid.client.id_token_verifier();
+    let id_token_verifier: CoreIdTokenVerifier = users.client.id_token_verifier();
 
     let id_token = token_response
         .extra_fields()
@@ -263,7 +255,7 @@ pub async fn authorized(
         .ok_or_else(|| err(None, "Server did not return an ID token"))?;
 
     let claims: &CoreIdTokenClaims = id_token
-        .claims(&id_token_verifier, nonce)
+        .claims(&id_token_verifier, &nonce)
         .map_err(|e| err(Some(&e), "Failed to verify ID token"))?;
     // info!("ID token claims: {claims:?}");
 
@@ -286,11 +278,11 @@ pub async fn authorized(
     }
 
     // Request the user info from the user info endpoint.
-    let userinfo_claims: UserInfoClaims<GitLabClaims, CoreGenderClaim> = openid
+    let userinfo_claims: UserInfoClaims<GitLabClaims, CoreGenderClaim> = users
         .client
         .user_info(token_response.access_token().to_owned(), None)
         .map_err(|e| err(Some(&e), "No user info endpoint"))?
-        .request_async(&openid.http_client)
+        .request_async(&users.http_client)
         .await
         .map_err(|e| err(Some(&e), "Failed to request user info"))?;
     info!("User info claims: {userinfo_claims:?}");
@@ -304,26 +296,32 @@ pub async fn authorized(
         admin: userinfo_claims
             .additional_claims()
             .groups
-            .contains(&openid.admin_group),
+            .contains(&users.admin_group),
         hue: rand::random_range(0..360),
     };
     info!("Authenticated user: {user:?}");
 
-    // Store the user session in the sessions map.
     let redirect_url = if let Some(redirect) = redirect {
         format!("/#{redirect}")
     } else {
-        "/".to_string()
+        format!("/")
     };
 
-    *login_state = AuthState::LoggedIn {
-        user,
-        expires_at: Instant::now() + Duration::from_secs(LOGGEDIN_EXPIRE_SEC),
-    };
+    users.sessions.retain(|_, state| match state {
+        AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
+        AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
+    });
+    users.sessions.insert(
+        session,
+        AuthState::LoggedIn {
+            user: user.clone(),
+            expires_at: Instant::now() + Duration::from_secs(LOGGEDIN_EXPIRE_SEC),
+        },
+    );
 
-    info!("User logged in successfully for session, redirecting to {redirect_url}");
+    info!("Login successful -> {redirect_url}");
 
-    Ok(warp::reply::html(format!(
+    Ok(Html(format!(
         r#"
         <html>
             <head>
@@ -335,17 +333,25 @@ pub async fn authorized(
             </body>
         </html>
         "#
-    ))
-    .into_response())
+    )))
 }
 
-pub async fn logout(state: Arc<ServerState>, session: Session) -> Result<Response, Rejection> {
-    state.users.sessions.remove(&session);
-    state.users.sessions.retain(|_, state| match state {
+pub async fn logout(
+    State(users): State<Arc<UserSessions>>,
+    session: Session,
+    Query(query): Query<RedirectQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    users.sessions.remove(&session);
+    users.sessions.retain(|_, state| match state {
         AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
         AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
     });
-    Ok(warp::redirect("/".parse::<warp::http::Uri>().unwrap()).into_response())
+    let redirect_url = if let Some(redirect) = query.redirect {
+        format!("/#{redirect}")
+    } else {
+        "/".to_string()
+    };
+    Ok((session.delete_cookie(Redirect::to(&redirect_url))).into_response())
 }
 
 #[derive(Debug, Deserialize, Serialize)]

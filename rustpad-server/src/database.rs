@@ -1,12 +1,13 @@
 //! Backend SQLite database handlers for persisting documents.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tracing::warn;
 
 use crate::{Identifier, rustpad::DocumentMeta};
 
@@ -84,7 +85,7 @@ impl Database {
                 let user: PersistedUser = serde_json::from_str(&user)?;
                 this.users.insert(username, user);
             } else {
-                log::warn!(
+                warn!(
                     "skipping non-user file in user directory: {}",
                     entry.path().display()
                 );
@@ -122,28 +123,13 @@ impl Database {
         let path = self.document_path_for(document_id);
         let meta_path = self.document_meta_path_for(document_id);
         let document = document.clone();
-        tokio::task::spawn_blocking(move || Self::store_document_raw(&path, &meta_path, &document))
-            .await??;
-        Ok(())
-    }
-    pub fn store_document_blocking(
-        &self,
-        document_id: &Identifier,
-        document: &PersistedDocument,
-    ) -> Result<()> {
-        let path = self.document_path_for(document_id);
-        let meta_path = self.document_meta_path_for(document_id);
-        Self::store_document_raw(&path, &meta_path, document)?;
-        Ok(())
-    }
-    fn store_document_raw(
-        path: &Path,
-        meta_path: &Path,
-        document: &PersistedDocument,
-    ) -> Result<()> {
-        std::fs::write(path, &document.text).context("Failed to write document")?;
-        std::fs::write(meta_path, serde_json::to_string_pretty(&document.meta)?)
-            .context("Failed to write meta")?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            std::fs::write(path, &document.text).context("Failed to write document")?;
+            std::fs::write(meta_path, serde_json::to_string_pretty(&document.meta)?)
+                .context("Failed to write meta")?;
+            Ok(())
+        })
+        .await??;
         Ok(())
     }
 
@@ -152,7 +138,9 @@ impl Database {
         let mut entries = fs::read_dir(self.storage.join("docs")).await?;
         let mut count = 0;
         while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_file() {
+            if entry.file_type().await?.is_file()
+                && let Ok(_) = entry.file_name().to_string_lossy().parse::<Identifier>()
+            {
                 count += 1;
             }
         }
