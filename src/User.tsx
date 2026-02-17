@@ -9,7 +9,7 @@ import {
 } from "@chakra-ui/react";
 import { useRef } from "react";
 import { FaPalette } from "react-icons/fa";
-import { VscAccount } from "react-icons/vsc";
+import { VscWorkspaceTrusted, VscWorkspaceUnknown } from "react-icons/vsc";
 
 import { type UserInfo } from "./rustpad";
 
@@ -21,11 +21,14 @@ type UserProps = {
 
 export function User({ info }: UserProps) {
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
+  let icon = info.admin ? VscWorkspaceTrusted : VscWorkspaceUnknown;
+  let name = info.admin ? info.name : ("Anon " + info.name);
+
   return (
     <HStack gap={2}>
-      <Icon as={VscAccount} color={nameColor} />
+      <Icon as={icon} color={nameColor} />
       <Text fontWeight="semibold" color={nameColor}>
-        {info.name}
+        {name}
       </Text>
     </HStack>
   );
@@ -35,13 +38,16 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
 
+  let icon = info.admin ? VscWorkspaceTrusted : VscWorkspaceUnknown;
+  let name = info.admin ? info.name : ("Anon " + info.name);
+
   return (
     <Popover.Root initialFocusEl={() => inputRef.current}>
       <Popover.Trigger asChild>
         <Button variant="outline" size="xs">
-          <Icon as={VscAccount} />
+          <Icon as={icon} color={nameColor} />
           <Text fontWeight="semibold" color={nameColor}>
-            {info.name}
+            {name}
           </Text>
         </Button>
       </Popover.Trigger>
@@ -56,11 +62,21 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
                 mb={2}
                 value={info.name}
                 maxLength={25}
+                disabled={info.admin}
                 onChange={(event) => onChangeName?.(event.target.value)}
               />
               <Button size="sm" w="100%" onClick={onChangeColor}>
                 <FaPalette /> Change Color
               </Button>
+              {info.admin ? (
+                <Button mt={2} size="sm" w="100%" colorPalette="red" onClick={() => (location.href = "/api/logout")}>
+                  Logout
+                </Button>
+              ) : (
+                <Button mt={2} size="sm" w="100%" colorPalette="green" onClick={() => (location.href = "/api/login?redirect=" + encodeURIComponent(location.hash.slice(1)))}>
+                  Login
+                </Button>
+              )}
             </Popover.Body>
             <Popover.CloseTrigger />
           </Popover.Content>

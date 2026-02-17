@@ -1,6 +1,7 @@
 /target
 pkg
 /storage
+auth.json
 
 node_modules
 .DS_Store

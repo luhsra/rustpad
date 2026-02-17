@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock, broadcast};
 use warp::ws::{Message, WebSocket};
 
-use crate::database::PersistedDocumentMeta;
 use crate::{database::PersistedDocument, ot::transform_index};
 
 /// The main object representing a collaborative session.
@@ -32,8 +31,7 @@ pub struct Rustpad {
 struct State {
     operations: Vec<UserOperation>,
     text: String,
-    language: String,
-    open: bool,
+    meta: DocumentMeta,
     users: HashMap<u64, UserInfo>,
     cursors: HashMap<u64, CursorData>,
 }
@@ -42,12 +40,23 @@ impl Default for State {
         Self {
             operations: Vec::new(),
             text: String::new(),
-            language: "markdown".to_string(),
-            open: false,
+            meta: DocumentMeta {
+                language: "markdown".to_string(),
+                limited: false,
+            },
             users: HashMap::new(),
             cursors: HashMap::new(),
         }
     }
+}
+
+/// Metadata for a persisted document.
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
+pub struct DocumentMeta {
+    /// Language of the document for editor syntax highlighting.
+    pub language: String,
+    /// If accessible by external users.
+    pub limited: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,9 +66,10 @@ struct UserOperation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct UserInfo {
-    name: String,
-    hue: u32,
+pub struct UserInfo {
+    pub name: String,
+    pub hue: u16,
+    pub admin: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,7 +89,7 @@ enum ClientMsg {
     /// Sets the metadata of the editor.
     SetMeta {
         language: Option<String>,
-        open: Option<bool>,
+        limited: Option<bool>,
     },
     /// Sets the user's current information.
     ClientInfo(UserInfo),
@@ -90,21 +100,17 @@ enum ClientMsg {
 /// A message sent to the client over WebSocket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum ServerMsg {
-    /// Informs the client of their unique socket ID.
-    Identity(u64),
+    /// Informs the client of their unique socket ID and admin status.
+    Identity { id: u64, info: Option<UserInfo> },
     /// Broadcasts text operations to all clients.
     History {
         start: usize,
         operations: Vec<UserOperation>,
     },
     /// Broadcasts the current metadata, last writer wins.
-    Meta { language: String, open: bool },
+    Meta { language: String, limited: bool },
     /// Broadcasts a user's information, or `None` on disconnect.
-    UserInfo {
-        id: u64,
-        authenticated: bool,
-        info: Option<UserInfo>,
-    },
+    UserInfo { id: u64, info: Option<UserInfo> },
     /// Broadcasts a user's cursor position.
     UserCursor { id: u64, data: CursorData },
 }
@@ -138,7 +144,7 @@ impl Rustpad {
         {
             let mut state = rustpad.state.write().await;
             state.text = document.text;
-            state.language = document.meta.language;
+            state.meta = document.meta;
             state.operations.push(UserOperation {
                 id: u64::MAX,
                 operation,
@@ -147,10 +153,10 @@ impl Rustpad {
         rustpad
     }
     /// Handle a connection from a WebSocket.
-    pub async fn on_connection(&self, socket: WebSocket) {
+    pub async fn on_connection(&self, socket: WebSocket, user: Option<UserInfo>) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
         info!("connection id={id}");
-        if let Err(e) = self.handle_connection(id, socket).await {
+        if let Err(e) = self.handle_connection(id, socket, user).await {
             warn!("connection terminated early: {}", e);
         }
         info!("disconnection, id = {}", id);
@@ -159,19 +165,15 @@ impl Rustpad {
             state.users.remove(&id);
             state.cursors.remove(&id);
         }
+
         self.update
-            .send(ServerMsg::UserInfo {
-                id,
-                info: None,
-                authenticated: false,
-            })
+            .send(ServerMsg::UserInfo { id, info: None })
             .ok();
     }
 
-    /// Returns a snapshot of the latest text.
-    pub async fn text(&self) -> String {
+    pub async fn is_limited(&self) -> bool {
         let state = self.state.read().await;
-        state.text.clone()
+        state.meta.limited
     }
 
     /// Returns a snapshot of the current document for persistence.
@@ -179,10 +181,7 @@ impl Rustpad {
         let state = self.state.read().await;
         PersistedDocument {
             text: state.text.clone(),
-            meta: PersistedDocumentMeta {
-                language: state.language.clone(),
-                open: state.open,
-            },
+            meta: state.meta.clone(),
         }
     }
 
@@ -203,10 +202,16 @@ impl Rustpad {
         self.killed.load(Ordering::Relaxed)
     }
 
-    async fn handle_connection(&self, id: u64, mut socket: WebSocket) -> Result<()> {
+    async fn handle_connection(
+        &self,
+        id: u64,
+        mut socket: WebSocket,
+        user: Option<UserInfo>,
+    ) -> Result<()> {
         let mut update_rx = self.update.subscribe();
 
-        let mut revision: usize = self.send_initial(id, &mut socket).await?;
+        let mut revision: usize = self.send_initial(id, &mut socket, user.clone()).await?;
+        let is_admin = user.as_ref().is_some_and(|u| u.admin);
 
         loop {
             // In order to avoid the "lost wakeup" problem, we first request a
@@ -214,6 +219,10 @@ impl Rustpad {
             // This is the same approach that `tokio::sync::watch` takes.
             let notified = self.notify.notified();
             if self.killed() {
+                break;
+            }
+            if !is_admin && self.is_limited().await {
+                info!("disconnecting non-admin user from closed document");
                 break;
             }
             if self.revision().await > revision {
@@ -229,7 +238,7 @@ impl Rustpad {
                     match result {
                         None => break,
                         Some(message) => {
-                            self.handle_message(id, message?).await?;
+                            self.handle_message(id, message?, &user).await?;
                         }
                     }
                 }
@@ -239,14 +248,19 @@ impl Rustpad {
         Ok(())
     }
 
-    async fn send_initial(&self, id: u64, socket: &mut WebSocket) -> Result<usize> {
-        socket.send(ServerMsg::Identity(id).into()).await?;
+    async fn send_initial(
+        &self,
+        id: u64,
+        socket: &mut WebSocket,
+        info: Option<UserInfo>,
+    ) -> Result<usize> {
+        socket.send(ServerMsg::Identity { id, info }.into()).await?;
         let mut messages = Vec::new();
         let revision = {
             let state = self.state.read().await;
             messages.push(ServerMsg::Meta {
-                language: state.language.clone(),
-                open: state.open,
+                language: state.meta.language.clone(),
+                limited: state.meta.limited,
             });
             if !state.operations.is_empty() {
                 messages.push(ServerMsg::History {
@@ -258,7 +272,6 @@ impl Rustpad {
                 messages.push(ServerMsg::UserInfo {
                     id,
                     info: Some(info.clone()),
-                    authenticated: false, // TODO: Inform over authentication
                 });
             }
             for (&id, data) in &state.cursors {
@@ -293,7 +306,12 @@ impl Rustpad {
         Ok(start + num_ops)
     }
 
-    async fn handle_message(&self, id: u64, message: Message) -> Result<()> {
+    async fn handle_message(
+        &self,
+        id: u64,
+        message: Message,
+        user: &Option<UserInfo>,
+    ) -> Result<()> {
         let msg: ClientMsg = match message.to_str() {
             Ok(text) => serde_json::from_str(text).context("failed to deserialize message")?,
             Err(()) => return Ok(()), // Ignore non-text messages
@@ -308,25 +326,37 @@ impl Rustpad {
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
-            ClientMsg::SetMeta { language, open } => {
+            ClientMsg::SetMeta { language, limited } => {
                 let mut state = self.state.write().await;
                 if let Some(language) = language.clone() {
-                    state.language = language;
+                    state.meta.language = language;
                 }
-                let language = state.language.clone();
-                if let Some(open) = open {
-                    state.open = open;
+                let language = state.meta.language.clone();
+                if let Some(limited) = limited {
+                    state.meta.limited = limited;
+                    if limited {
+                        info!("document is now limited, disconnecting non-admin users");
+                        self.notify.notify_waiters();
+                    }
                 }
-                let open = state.open;
+                let limited = state.meta.limited;
                 drop(state);
-                self.update.send(ServerMsg::Meta { language, open }).ok();
+                self.update.send(ServerMsg::Meta { language, limited }).ok();
             }
-            ClientMsg::ClientInfo(info) => {
+            ClientMsg::ClientInfo(mut info) => {
+                // Ensure clients can't lie about being admins
+                if let Some(user) = user {
+                    info.admin = user.admin;
+                    if info.admin {
+                        // Admins cannot change their name
+                        info.name = user.name.clone();
+                    }
+                }
+                info.hue %= 360;
                 self.state.write().await.users.insert(id, info.clone());
                 let msg = ServerMsg::UserInfo {
                     id,
                     info: Some(info),
-                    authenticated: false, // TODO: Inform over authentication
                 };
                 self.update.send(msg).ok();
             }

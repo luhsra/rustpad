@@ -8,38 +8,31 @@ use rand::random;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::Identifier;
+use crate::{Identifier, rustpad::DocumentMeta};
 
 /// Represents a document persisted in database storage.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct PersistedDocument {
     /// Metadata of the document.
-    pub meta: PersistedDocumentMeta,
+    pub meta: DocumentMeta,
     /// Text content of the document.
     pub text: String,
 }
 impl PersistedDocument {
     /// Create a new persisted document with the given text and language.
-    pub fn new(text: String, language: String, open: bool) -> Self {
+    pub fn new(text: String, language: String, limited: bool) -> Self {
         Self {
-            meta: PersistedDocumentMeta { language, open },
+            meta: DocumentMeta { language, limited },
             text,
         }
     }
 }
 
-/// Metadata for a persisted document.
-#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
-pub struct PersistedDocumentMeta {
-    /// Language of the document for editor syntax highlighting.
-    pub language: String,
-    /// If accessible by external users.
-    pub open: bool,
-}
-
 /// Represents a user persisted in database storage.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PersistedUser {
+    /// Color of the user's editor cursor.
+    pub color: u16,
     /// List of pinned documents by the user.
     pub pinned_documents: Vec<RecentDocument>,
     /// List of recently accessed documents by the user.
@@ -113,8 +106,8 @@ impl Database {
             let meta_data = fs::read_to_string(meta_path).await?;
 
             let text = fs::read_to_string(self.document_path_for(document_id)).await?;
-            let meta: PersistedDocumentMeta = serde_json::from_str(&meta_data)?;
-            return Ok(PersistedDocument { text, meta });
+            let meta: DocumentMeta = serde_json::from_str(&meta_data)?;
+            Ok(PersistedDocument { text, meta })
         } else {
             bail!("Document not found");
         }

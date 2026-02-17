@@ -14,11 +14,11 @@ const wasmBuffer = typeof Bun !== "undefined"
 export type RustpadOptions = {
   readonly uri: string;
   readonly editor: editor.IStandaloneCodeEditor;
-  readonly onConnected?: () => void;
+  readonly onConnected?: (info?: UserInfo) => void;
   readonly onDisconnected?: () => void;
   readonly onDesynchronized?: () => void;
   readonly onError?: (error: Event) => void;
-  readonly onChangeMeta?: (language: string, open: boolean) => void;
+  readonly onChangeMeta?: (language: string, limited: boolean) => void;
   readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
   readonly reconnectInterval?: number;
 };
@@ -27,6 +27,7 @@ export type RustpadOptions = {
 export type UserInfo = {
   readonly name: string;
   readonly hue: number;
+  readonly admin: boolean;
 };
 
 /** Browser client for Rustpad. */
@@ -105,14 +106,15 @@ class Rustpad {
   }
 
   /** Try to set the metadata of the editor, if connected. */
-  setMeta(language?: string, open?: boolean): boolean {
-    this.ws?.send(JSON.stringify({ SetMeta: { language, open } }));
+  setMeta(language?: string, limited?: boolean): boolean {
+    this.ws?.send(JSON.stringify({ SetMeta: { language, limited } }));
     return this.ws !== undefined;
   }
 
   /** Set the user's information. */
   setInfo(info: UserInfo) {
-    this.myInfo = info;
+    // Don't allow users to set their own admin status
+    this.myInfo = { ...info, admin: this.myInfo?.admin ?? false };
     this.sendInfo();
   }
 
@@ -136,7 +138,7 @@ class Rustpad {
       console.info("connected to", this.options.uri);
       this.connecting = false;
       this.ws = ws;
-      this.options.onConnected?.();
+      // Trigger connection handler later after receiving identity message
       this.users = {};
       this.options.onChangeUsers?.(this.users);
       this.sendInfo();
@@ -173,8 +175,11 @@ class Rustpad {
   }
 
   private handleMessage(msg: ServerMsg) {
+    console.debug("received message", msg);
     if (msg.Identity !== undefined) {
-      this.me = msg.Identity;
+      this.me = msg.Identity.id;
+      this.myInfo = msg.Identity.info;
+      this.options.onConnected?.(this.myInfo);
     } else if (msg.History !== undefined) {
       const { start, operations } = msg.History;
       if (start > this.revision) {
@@ -193,7 +198,7 @@ class Rustpad {
         }
       }
     } else if (msg.Meta !== undefined) {
-      this.options.onChangeMeta?.(msg.Meta.language, msg.Meta.open);
+      this.options.onChangeMeta?.(msg.Meta.language, msg.Meta.limited);
     } else if (msg.UserInfo !== undefined) {
       const { id, info } = msg.UserInfo;
       if (id !== this.me) {
@@ -352,6 +357,7 @@ class Rustpad {
     for (const [id, data] of Object.entries(this.userCursors)) {
       if (id in this.users) {
         const { hue, name } = this.users[id as any]!;
+        console.info("updating cursor for user", name, "with hue", hue);
         generateCssStyles(hue);
 
         for (const cursor of data.cursors) {
@@ -457,18 +463,20 @@ type CursorData = {
 };
 
 type ServerMsg = {
-  Identity?: number;
+  Identity?: {
+    id: number;
+    info: UserInfo;
+  };
   History?: {
     start: number;
     operations: UserOperation[];
   };
   Meta?: {
     language: string;
-    open: boolean;
+    limited: boolean;
   };
   UserInfo?: {
     id: number;
-    authenticated: boolean;
     info: UserInfo | null;
   };
   UserCursor?: {

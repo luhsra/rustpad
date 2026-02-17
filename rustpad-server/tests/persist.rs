@@ -51,6 +51,7 @@ async fn test_persist() -> Result<()> {
     let filter = server(ServerConfig {
         expiry_days: 2,
         database: Database::temporary().await?,
+        openid: None,
     });
 
     expect_text(&filter, "persist", "").await;

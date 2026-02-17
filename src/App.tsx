@@ -31,7 +31,7 @@ function getWsUri(id: string) {
 }
 
 function generateName() {
-  return "Anonymous " + animals[Math.floor(Math.random() * animals.length)];
+  return animals[Math.floor(Math.random() * animals.length)]!;
 }
 
 function generateHue() {
@@ -48,7 +48,9 @@ function App() {
   const [hue, setHue] = useLocalStorageState("hue", {
     defaultValue: generateHue,
   });
+  const [admin, setAdmin] = useState(false);
   const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
+  const [limited, setLimited] = useState(false);
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
   const rustpad = useRef<Rustpad | undefined>(undefined);
   const id = useHash();
@@ -81,7 +83,15 @@ function App() {
       rustpad.current = new Rustpad({
         uri: getWsUri(id),
         editor,
-        onConnected: () => setConnection("connected"),
+        onConnected: (info) => {
+          console.info("Connected to Rustpad server", info);
+          if (info) {
+            setName(info.name);
+            setAdmin(info.admin);
+            setHue(info.hue);
+          }
+          setConnection("connected");
+        },
         onDisconnected: () => setConnection("disconnected"),
         onDesynchronized: () => {
           setConnection("desynchronized");
@@ -101,10 +111,11 @@ function App() {
             duration: undefined,
           });
         },
-        onChangeMeta: (language, open) => {
+        onChangeMeta: (language, limited) => {
           if (languages.getLanguages().some((it) => it.id === language)) {
             setLanguage(language);
           }
+          setLimited(limited);
         },
         onChangeUsers: setUsers,
       });
@@ -117,9 +128,9 @@ function App() {
 
   useEffect(() => {
     if (connection === "connected") {
-      rustpad.current?.setInfo({ name, hue });
+      rustpad.current?.setInfo({ name, hue, admin });
     }
-  }, [connection, name, hue]);
+  }, [connection, name, hue, admin]);
 
   function handleLanguageChange(language: string) {
     setLanguage(language);
@@ -180,7 +191,7 @@ function App() {
       </Box>
       <Footer
         language={language}
-        currentUser={{ name, hue }}
+        currentUser={{ name, hue, admin }}
         users={users}
         onLanguageChange={handleLanguageChange}
         onLoadSample={handleLoadSample}

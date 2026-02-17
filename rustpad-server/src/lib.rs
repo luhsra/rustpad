@@ -1,10 +1,7 @@
 //! Server backend for the Rustpad collaborative text editor.
-
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
 
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -14,68 +11,20 @@ use log::{error, info};
 use rand::random_range;
 use serde::Serialize;
 use tokio::time::{self, Instant};
+use warp::reply::Response;
 use warp::{Filter, Rejection, Reply, filters::BoxedFilter, ws::Ws};
 
-use crate::{database::Database, rustpad::Rustpad};
-
+mod auth;
 pub mod database;
+use database::Database;
 mod ot;
 mod rustpad;
+use rustpad::Rustpad;
+mod util;
+use util::Identifier;
 
-/// Unique identifier for a document or user.
-#[repr(align(64))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Identifier([u8; Self::MAX_LEN]);
-impl Identifier {
-    /// Maximum length of a document ID, in bytes.
-    pub const MAX_LEN: usize = 64;
-
-    fn valid_char(c: char) -> bool {
-        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ')
-    }
-}
-impl FromStr for Identifier {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() > Self::MAX_LEN {
-            anyhow::bail!("Document ID is too long");
-        }
-        if !s.chars().all(Self::valid_char) {
-            anyhow::bail!("Document ID contains invalid characters");
-        }
-        let mut bytes = [0u8; Self::MAX_LEN];
-        bytes[..s.len()].copy_from_slice(s.as_bytes());
-        Ok(Self(bytes))
-    }
-}
-impl AsRef<str> for Identifier {
-    fn as_ref(&self) -> &str {
-        let len = self.0.iter().position(|&b| b == 0).unwrap_or(Self::MAX_LEN);
-        std::str::from_utf8(&self.0[..len]).expect("DocumentID contains invalid UTF-8")
-    }
-}
-impl std::fmt::Display for Identifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_ref())
-    }
-}
-impl serde::Serialize for Identifier {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_ref())
-    }
-}
-impl<'de> serde::Deserialize<'de> for Identifier {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).map_err(serde::de::Error::custom)
-    }
-}
+use crate::rustpad::UserInfo;
+use crate::util::SessionState;
 
 /// Server configuration, parsed from environment variables.
 #[derive(Debug)]
@@ -84,13 +33,24 @@ pub struct ServerConfig {
     pub expiry_days: u32,
     /// Database for document persistence.
     pub database: Database,
+    /// OpenID Connect configuration, if authentication is enabled.
+    pub openid: Option<auth::OpenIdState>,
 }
 impl ServerConfig {
     /// Construct a new server configuration.
-    pub async fn new(expiry_days: u32, storage: PathBuf) -> anyhow::Result<Self> {
+    pub async fn new(
+        expiry_days: u32,
+        storage: PathBuf,
+        openid: Option<auth::OpenIdConfig>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             expiry_days,
             database: Database::new(storage).await?,
+            openid: if let Some(config) = openid {
+                Some(auth::OpenIdState::new(config).await?)
+            } else {
+                None
+            },
         })
     }
     /// Construct a new server configuration with a temporary database for testing.
@@ -98,6 +58,7 @@ impl ServerConfig {
         Ok(Self {
             expiry_days,
             database: Database::temporary().await?,
+            openid: None,
         })
     }
     /// Load server configuration from environment variables.
@@ -109,7 +70,16 @@ impl ServerConfig {
         let storage = std::env::var("STORAGE")
             .unwrap_or_else(|_| String::from("storage"))
             .into();
-        Self::new(expiry_days, storage).await
+        let openid = if let Ok(config) = std::env::var("OPENID_CONFIG") {
+            Some(
+                serde_json::from_str(&tokio::fs::read_to_string(&config).await?)
+                    .context("Unable to parse OPENID_CONFIG")?,
+            )
+        } else {
+            error!("OPENID_CONFIG not set, authentication will be disabled");
+            None
+        };
+        Self::new(expiry_days, storage, openid).await
     }
 }
 
@@ -150,6 +120,8 @@ struct ServerState {
     documents: DashMap<Identifier, Document>,
     /// Connection to the database pool, if persistence is enabled.
     database: Database,
+    /// User sessions for authentication, if enabled.
+    users: auth::UserSessions,
 }
 impl Drop for ServerState {
     fn drop(&mut self) {
@@ -181,37 +153,54 @@ struct Stats {
     num_documents: usize,
     /// Number of documents persisted in the database.
     database_size: usize,
+    /// User name
+    user: Option<String>,
+    /// Whether the user is an admin
+    admin: bool,
 }
 
 /// A combined filter handling all server routes.
-pub fn server(config: ServerConfig) -> BoxedFilter<(impl Reply,)> {
-    warp::path("api")
-        .and(backend(config.database, config.expiry_days))
-        .or(frontend())
+pub fn server(config: ServerConfig) -> BoxedFilter<(Response,)> {
+    SessionState::filter()
+        .and(
+            warp::path("api")
+                .and(backend(config))
+                .or(frontend())
+                .unify()
+                .boxed(),
+        )
+        .map(|session: SessionState, reply: Response| session.attach_reply(reply))
         .boxed()
 }
 
 /// Construct routes for static files from React.
-fn frontend() -> BoxedFilter<(impl Reply,)> {
-    warp::fs::dir("dist").boxed()
+fn frontend() -> BoxedFilter<(Response,)> {
+    warp::fs::dir("dist").map(Reply::into_response).boxed()
 }
 
 /// Construct backend routes, including WebSocket handlers.
-fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
+fn backend(config: ServerConfig) -> BoxedFilter<(Response,)> {
+    let ServerConfig {
+        expiry_days,
+        database,
+        openid,
+    } = config;
     let state = Arc::new(ServerState {
         documents: Default::default(),
         database,
+        users: auth::UserSessions::new(openid),
     });
-    tokio::spawn(cleaner(state.clone(), expiry_days));
 
     let state_filter = warp::any().map(move || state.clone());
 
     let socket = warp::path!("socket" / Identifier)
+        .and(SessionState::filter())
         .and(warp::ws())
         .and(state_filter.clone())
         .and_then(socket_handler);
 
     let text = warp::path!("text" / Identifier)
+        .and(SessionState::filter())
         .and(state_filter.clone())
         .and_then(text_handler);
 
@@ -220,86 +209,167 @@ fn backend(database: Database, expiry_days: u32) -> BoxedFilter<(impl Reply,)> {
         .expect("SystemTime returned before UNIX_EPOCH")
         .as_secs();
     let stats = warp::path!("stats")
+        .and(SessionState::filter())
         .and(warp::any().map(move || start_time))
-        .and(state_filter)
+        .and(state_filter.clone())
         .and_then(stats_handler);
 
-    socket.or(text).or(stats).boxed()
+    let login = warp::path("login")
+        .and(SessionState::filter())
+        .and(warp::get())
+        .and(state_filter.clone())
+        .and(warp::query::<auth::LoginQuery>())
+        .and_then(
+            async move |session: SessionState, state, query| -> Result<_, Rejection> {
+                auth::login(state, session.session.clone(), query)
+                    .await
+                    .map(|reply| reply.into_response())
+            },
+        );
+
+    let authorized = warp::path("authorized")
+        .and(warp::get())
+        .and(SessionState::filter())
+        .and(warp::query::<auth::AuthorizedQuery>())
+        .and(state_filter.clone())
+        .and_then(
+            async move |session: SessionState, query, state| -> Result<_, Rejection> {
+                auth::authorized(state, session.session.clone(), query)
+                    .await
+                    .map(|reply| reply.into_response())
+            },
+        );
+
+    let logout = warp::path("logout")
+        .and(warp::get())
+        .and(SessionState::filter())
+        .and(state_filter.clone())
+        .and_then(
+            async move |session: SessionState, state| -> Result<_, Rejection> {
+                auth::logout(state, session.session)
+                    .await
+                    .map(|reply| reply.into_response())
+            },
+        );
+
+    socket
+        .or(text)
+        .unify()
+        .or(stats)
+        .unify()
+        .or(login)
+        .unify()
+        .or(authorized)
+        .unify()
+        .or(logout)
+        .unify()
+        .boxed()
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.
 async fn socket_handler(
     id: Identifier,
+    session: SessionState,
     ws: Ws,
     state: Arc<ServerState>,
-) -> Result<impl Reply, Rejection> {
+) -> Result<Response, Rejection> {
     use dashmap::mapref::entry::Entry;
 
-    info!("socket connection for id = {}", id);
+    let user = state.users.get_user(&session.session).await;
+    let is_admin = user.as_ref().map(|u| u.admin).unwrap_or(false);
+
+    info!("socket connection for id = {id}");
 
     let mut entry = match state.documents.entry(id.clone()) {
-        Entry::Occupied(e) => e.into_ref(),
+        Entry::Occupied(e) => {
+            let document = e.into_ref();
+            if document.rustpad.is_limited().await && !is_admin {
+                info!("denying access to closed document {id}");
+                return Ok(warp::http::StatusCode::FORBIDDEN.into_response());
+            }
+            document
+        }
         Entry::Vacant(e) => {
             let rustpad = if let Ok(document) = state.database.load_document(&id).await {
+                if document.meta.limited && !is_admin {
+                    info!("denying access to closed document {id}");
+                    return Ok(warp::http::StatusCode::FORBIDDEN.into_response());
+                }
+
                 Arc::new(Rustpad::load(document).await)
             } else {
                 Arc::new(Rustpad::default())
             };
-            tokio::spawn(persister(id, Arc::clone(&rustpad), state.clone()));
+            tokio::spawn(persister(id.clone(), Arc::clone(&rustpad), state.clone()));
             e.insert(Document::new(rustpad))
         }
     };
 
     let value = entry.value_mut();
-    value.last_accessed = Instant::now();
     let rustpad = Arc::clone(&value.rustpad);
-    Ok(ws.on_upgrade(|socket| async move { rustpad.on_connection(socket).await }))
+    value.last_accessed = Instant::now();
+    let upgrade = ws.on_upgrade(async move |socket| {
+        rustpad
+            .on_connection(socket, user.map(UserInfo::from))
+            .await
+    });
+    Ok(upgrade.into_response())
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
-async fn text_handler(id: Identifier, state: Arc<ServerState>) -> Result<impl Reply, Rejection> {
-    Ok(match state.documents.get(&id) {
-        Some(value) => value.rustpad.text().await,
-        None => state
-            .database
-            .load_document(&id)
-            .await
-            .map(|document| document.text)
-            .unwrap_or_default(),
-    })
+async fn text_handler(
+    id: Identifier,
+    session: SessionState,
+    state: Arc<ServerState>,
+) -> Result<Response, Rejection> {
+    let document = match state.documents.get(&id) {
+        Some(value) => Some(value.rustpad.snapshot().await),
+        None => state.database.load_document(&id).await.ok(),
+    };
+    if let Some(document) = document {
+        info!(
+            "text request for id = {id}, limited = {}",
+            document.meta.limited
+        );
+        if document.meta.limited {
+            if let Some(user) = state.users.get_user(&session.session).await
+                && user.admin
+            {
+                info!("access {} -> {id}", user.name);
+            } else {
+                return Ok(warp::http::StatusCode::FORBIDDEN.into_response());
+            }
+        }
+        return Ok(warp::reply::with_header(
+            document.text,
+            "Language",
+            document.meta.language.clone(),
+        )
+        .into_response());
+    }
+    Ok(warp::reply().into_response())
 }
 
 /// Handler for the `/api/stats` endpoint.
-async fn stats_handler(start_time: u64, state: Arc<ServerState>) -> Result<impl Reply, Rejection> {
+async fn stats_handler(
+    session: SessionState,
+    start_time: u64,
+    state: Arc<ServerState>,
+) -> Result<Response, Rejection> {
     let num_documents = state.documents.len();
     let database_size = match state.database.document_count().await {
         Ok(size) => size,
         Err(e) => return Err(warp::reject::custom(CustomReject(e))),
     };
+    let user = state.users.get_user(&session.session).await;
     Ok(warp::reply::json(&Stats {
         start_time,
         num_documents,
         database_size,
-    }))
-}
-
-const HOUR: Duration = Duration::from_secs(3600);
-
-/// Reclaims memory for documents.
-async fn cleaner(state: Arc<ServerState>, expiry_days: u32) {
-    loop {
-        time::sleep(HOUR).await;
-        let mut keys = Vec::new();
-        for entry in &state.documents {
-            if entry.last_accessed.elapsed() > HOUR * 24 * expiry_days {
-                keys.push(entry.key().clone());
-            }
-        }
-        info!("cleaner removing keys: {:?}", keys);
-        for key in keys {
-            state.documents.remove(&key);
-        }
-    }
+        user: user.as_ref().map(|u| u.name.clone()),
+        admin: user.as_ref().map(|u| u.admin).unwrap_or(false),
+    })
+    .into_response())
 }
 
 const PERSIST_INTERVAL: Duration = Duration::from_secs(3);
@@ -312,6 +382,11 @@ async fn persister(id: Identifier, rustpad: Arc<Rustpad>, state: Arc<ServerState
         let interval = PERSIST_INTERVAL + random_range(Duration::ZERO..=PERSIST_INTERVAL_JITTER);
         time::sleep(interval).await;
         let revision = rustpad.revision().await;
+
+        // TODO: only persist if there is any content!
+        // TODO: version history
+        // TODO: remove from memory after persisting, if no one edits, and reload on demand
+
         if revision > last_revision {
             info!("persisting revision {} for id = {}", revision, id);
             if let Err(e) = state

@@ -210,25 +210,25 @@ async fn test_set_meta() -> Result<()> {
     assert_eq!(msg, json!({ "Identity": 0 }));
     assert!(client.recv().await?.get("Meta").is_some());
 
-    let msg = json!({ "SetMeta": { "language": "javascript", "open": false } });
+    let msg = json!({ "SetMeta": { "language": "javascript", "limited": false } });
     client.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "open": false } }));
+    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "limited": false } }));
 
     let mut client2 = connect(&filter, "foobar").await?;
     let msg = client2.recv().await?;
     assert_eq!(msg, json!({ "Identity": 1 }));
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "open": false } }));
+    assert_eq!(msg, json!({ "Meta": { "language": "javascript", "limited": false } }));
 
-    let msg = json!({ "SetMeta": { "language": "python", "open": true } });
+    let msg = json!({ "SetMeta": { "language": "python", "limited": true } });
     client2.send(&msg).await;
 
     let msg = client.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "python", "open": true } }));
+    assert_eq!(msg, json!({ "Meta": { "language": "python", "limited": true } }));
     let msg = client2.recv().await?;
-    assert_eq!(msg, json!({ "Meta": { "language": "python", "open": true } }));
+    assert_eq!(msg, json!({ "Meta": { "language": "python", "limited": true } }));
 
     expect_text(&filter, "foobar", "").await;
     Ok(())
