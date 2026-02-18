@@ -14,12 +14,14 @@ import { languages } from "monaco-editor";
 import { VscOrganization } from "react-icons/vsc";
 
 import UserMe, { User } from "./User";
-import { type UserInfo } from "./rustpad";
+import { canAccess, type OnlineUser, type Visibility } from "./rustpad";
 
 export type FooterProps = {
   language: string;
-  currentUser: UserInfo;
-  users: Record<number, UserInfo>;
+  currentUser: OnlineUser;
+  users: Record<number, OnlineUser>;
+  visibility: Visibility;
+  onSetVisibility: (visibility: Visibility) => void;
   onLanguageChange: (language: string) => void;
   onLoadSample: () => void;
   onChangeName: (name: string) => void;
@@ -30,6 +32,8 @@ function Footer({
   language,
   currentUser,
   users,
+  visibility,
+  onSetVisibility,
   onLanguageChange,
   onLoadSample,
   onChangeName,
@@ -39,7 +43,12 @@ function Footer({
   let lang = languages
     .getLanguages()
     .map((it) => it.id)
-    .filter((it) => !it.includes("."));
+    .filter((it) => !it.includes("."))
+    .toSorted();
+
+  const visibilityOptions: Visibility[] = ["public", "internal", "private"];
+
+  const currentVisibilityOptions = visibilityOptions.filter((option) => option !== visibility && canAccess(currentUser.role, option));
 
   return (
     <Flex bgColor="#0071c3" color="white" gap={2}>
@@ -62,7 +71,7 @@ function Footer({
       <Dialog.Root>
         <Dialog.Trigger asChild>
           <Button variant="outline" size="xs">
-            Sample
+            Settings
           </Button>
         </Dialog.Trigger>
         <Portal>
@@ -73,19 +82,32 @@ function Footer({
                 <CloseButton size="sm" />
               </Dialog.CloseTrigger>
               <Dialog.Header>
-                <Dialog.Title>Load Sample</Dialog.Title>
+                <Dialog.Title>Document Settings</Dialog.Title>
               </Dialog.Header>
               <Dialog.Body>
+                {currentVisibilityOptions.length > 0 && (
+                  <Text>Change document visibility</Text>
+                )}
+                {
+                  currentVisibilityOptions.map((option) => (
+                    <Button
+                      key={option}
+                      mt={2}
+                      onClick={() => onSetVisibility(option)}
+                    >
+                      {option}
+                    </Button>
+                  ))
+                }
+
                 <Text>Delete this document and load the example code?</Text>
+                <Button mt={4} onClick={onLoadSample}>
+                  Load Sample
+                </Button>
               </Dialog.Body>
               <Dialog.Footer>
                 <Dialog.ActionTrigger asChild>
-                  <Button variant="outline">Cancel</Button>
-                </Dialog.ActionTrigger>
-                <Dialog.ActionTrigger asChild>
-                  <Button onClick={onLoadSample} colorPalette="red">
-                    Delete and Load
-                  </Button>
+                  <Button variant="outline">Close</Button>
                 </Dialog.ActionTrigger>
               </Dialog.Footer>
             </Dialog.Content>

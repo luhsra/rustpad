@@ -9,20 +9,26 @@ import {
 } from "@chakra-ui/react";
 import { useRef } from "react";
 import { FaPalette } from "react-icons/fa";
-import { VscWorkspaceTrusted, VscWorkspaceUnknown } from "react-icons/vsc";
+import { VscUnverified, VscVerified, VscVerifiedFilled } from "react-icons/vsc";
 
-import { type UserInfo } from "./rustpad";
+import { type OnlineUser } from "./rustpad";
 
 type UserProps = {
-  info: UserInfo;
+  info: OnlineUser;
   onChangeName?: (name: string) => void;
   onChangeColor?: () => void;
 };
 
+const icons = {
+  admin: VscVerifiedFilled,
+  user: VscVerified,
+  anon: VscUnverified,
+}
+
 export function User({ info }: UserProps) {
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
-  let icon = info.admin ? VscWorkspaceTrusted : VscWorkspaceUnknown;
-  let name = info.admin ? info.name : ("Anon " + info.name);
+  const icon = icons[info.role];
+  const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
 
   return (
     <HStack gap={2}>
@@ -38,12 +44,12 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
 
-  let icon = info.admin ? VscWorkspaceTrusted : VscWorkspaceUnknown;
-  let name = info.admin ? info.name : ("Anon " + info.name);
+  const icon = icons[info.role];
+  const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
 
-  let query = new URLSearchParams({ location: location.hash.slice(1) });
-  let login_url = "/auth/login?" + query.toString();
-  let logout_url = "/auth/logout?" + query.toString();
+  const query = new URLSearchParams({ location: location.hash.slice(1) });
+  const login_url = "/auth/login?" + query.toString();
+  const logout_url = "/auth/logout?" + query.toString();
 
   return (
     <Popover.Root initialFocusEl={() => inputRef.current}>
@@ -66,13 +72,13 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
                 mb={2}
                 value={info.name}
                 maxLength={25}
-                disabled={info.admin}
+                disabled={info.role !== "anon"}
                 onChange={(event) => onChangeName?.(event.target.value)}
               />
               <Button size="sm" w="100%" onClick={onChangeColor}>
                 <FaPalette /> Change Color
               </Button>
-              {info.admin ? (
+              {info.role !== "anon" ? (
                 <Button mt={2} size="sm" w="100%" colorPalette="red" onClick={() => (location.href = logout_url)}>
                   Logout
                 </Button>

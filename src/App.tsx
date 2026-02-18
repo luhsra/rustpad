@@ -11,7 +11,7 @@ import Footer from "./Footer";
 import Header from "./Header";
 import animals from "./animals.json";
 import { useColorMode } from "./components/color-mode";
-import Rustpad, { type UserInfo } from "./rustpad";
+import Rustpad, { type OnlineUser, type UserRole, type Visibility } from "./rustpad";
 import { Toaster, toaster } from "./components/toaster";
 import useHash from "./useHash";
 import { Editor } from "@monaco-editor/react";
@@ -41,16 +41,16 @@ function generateHue() {
 function App() {
   const [language, setLanguage] = useState("markdown");
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
-  const [users, setUsers] = useState<Record<number, UserInfo>>({});
+  const [users, setUsers] = useState<Record<number, OnlineUser>>({});
   const [name, setName] = useLocalStorageState("name", {
     defaultValue: generateName,
   });
   const [hue, setHue] = useLocalStorageState("hue", {
     defaultValue: generateHue,
   });
-  const [admin, setAdmin] = useState(false);
+  const [role, setRole] = useState<UserRole>("anon");
   const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
-  const [limited, setLimited] = useState(false);
+  const [visibility, setVisibility] = useState<Visibility>("public");
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
   const rustpad = useRef<Rustpad | undefined>(undefined);
   const id = useHash();
@@ -87,7 +87,7 @@ function App() {
           console.info("Connected to Rustpad server", info);
           if (info) {
             setName(info.name);
-            setAdmin(info.admin);
+            setRole(info.role);
             setHue(info.hue);
           }
           setConnection("connected");
@@ -100,6 +100,7 @@ function App() {
             description: "Please save your work and refresh the page.",
             type: "error",
             duration: undefined,
+            closable: true,
           });
         },
         onError: (error) => {
@@ -109,15 +110,21 @@ function App() {
             description: "The name can only contain letters, numbers, hyphens and underscores.",
             type: "error",
             duration: undefined,
+            closable: true,
           });
         },
-        onChangeMeta: (language, limited) => {
+        onChangeMeta: (language, visibility) => {
           if (languages.getLanguages().some((it) => it.id === language)) {
             setLanguage(language);
           }
-          setLimited(limited);
+          setVisibility(visibility);
         },
         onChangeUsers: setUsers,
+        onChangeMe: (info) => {
+          setName(info.name);
+          setRole(info.role);
+          setHue(info.hue);
+        }
       });
       return () => {
         rustpad.current?.dispose();
@@ -128,9 +135,9 @@ function App() {
 
   useEffect(() => {
     if (connection === "connected") {
-      rustpad.current?.setInfo({ name, hue, admin });
+      rustpad.current?.setInfo({ name, hue, role });
     }
-  }, [connection, name, hue, admin]);
+  }, [connection, name, hue, role]);
 
   function handleLanguageChange(language: string) {
     setLanguage(language);
@@ -142,6 +149,27 @@ function App() {
             All users are now editing in{" "}
             <Text as="span" fontWeight="semibold">
               {language}
+            </Text>
+            .
+          </>
+        ),
+        type: "info",
+        duration: 2000,
+        closable: true,
+      });
+    }
+  }
+
+  function handleVisibilityChange(visibility: Visibility) {
+    setVisibility(visibility);
+    if (rustpad.current?.setMeta(undefined, visibility)) {
+      toaster.create({
+        title: "Visibility updated",
+        description: (
+          <>
+            The document is now{" "}
+            <Text as="span" fontWeight="semibold">
+              {visibility}
             </Text>
             .
           </>
@@ -191,8 +219,10 @@ function App() {
       </Box>
       <Footer
         language={language}
-        currentUser={{ name, hue, admin }}
+        visibility={visibility}
+        currentUser={{ name, hue, role }}
         users={users}
+        onSetVisibility={handleVisibilityChange}
         onLanguageChange={handleLanguageChange}
         onLoadSample={handleLoadSample}
         onChangeName={(name) => name.length > 0 && setName(name)}

@@ -8,6 +8,7 @@ use operational_transform::OperationSeq;
 use rustpad_server::{
     ServerState,
     database::{Database, PersistedDocument},
+    rustpad::Visibility,
     server,
 };
 use serde_json::json;
@@ -26,13 +27,17 @@ async fn test_database() -> Result<()> {
     assert!(database.load_document(&hello).await.is_err());
     assert!(database.load_document(&world).await.is_err());
 
-    let doc1 = PersistedDocument::new("Hello Text".into(), "markdown".into(), false);
+    let doc1 = PersistedDocument::new("Hello Text".into(), "markdown".into(), Visibility::Public);
 
     assert!(database.store_document(&hello, &doc1).await.is_ok());
     assert_eq!(database.load_document(&hello).await?, doc1);
     assert!(database.load_document(&world).await.is_err());
 
-    let doc2 = PersistedDocument::new("print('World Text :)')".into(), "python".into(), false);
+    let doc2 = PersistedDocument::new(
+        "print('World Text :)')".into(),
+        "python".into(),
+        Visibility::Public,
+    );
 
     assert!(database.store_document(&world, &doc2).await.is_ok());
     assert_eq!(database.load_document(&hello).await?, doc1);

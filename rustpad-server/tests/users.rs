@@ -24,14 +24,14 @@ async fn test_two_users() -> Result<()> {
     let alice = json!({
         "name": "Alice",
         "hue": 42,
-        "admin": false,
+        "role": "anon",
     });
     socket.send(&json!({ "ClientInfo": alice })).await;
 
     let alice_info = json!({
         "UserInfo": {
             "id": 0,
-            "info": alice,
+            "user": alice,
         }
     });
     assert_eq!(socket.recv().await?, alice_info);
@@ -47,14 +47,14 @@ async fn test_two_users() -> Result<()> {
     let bob = json!({
         "name": "Bob",
         "hue": 96,
-        "admin": false,
+        "role": "anon",
     });
     socket2.send(&json!({ "ClientInfo": bob })).await;
 
     let bob_info = json!({
         "UserInfo": {
             "id": 1,
-            "info": bob,
+            "user": bob,
         }
     });
     assert_eq!(socket2.recv().await?, bob_info);
@@ -97,14 +97,14 @@ async fn test_leave_rejoin() -> Result<()> {
     let alice = json!({
         "name": "Alice",
         "hue": 42,
-        "admin": false,
+        "role": "anon",
     });
     socket.send(&json!({ "ClientInfo": alice })).await;
 
     let alice_info = json!({
         "UserInfo": {
             "id": 0,
-            "info": alice,
+            "user": alice,
         }
     });
     assert_eq!(socket.recv().await?, alice_info);
@@ -122,14 +122,14 @@ async fn test_leave_rejoin() -> Result<()> {
     let bob = json!({
         "name": "Bob",
         "hue": 96,
-        "admin": false,
+        "role": "anon",
     });
     socket2.send(&json!({ "ClientInfo": bob })).await;
 
     let bob_info = json!({
         "UserInfo": {
             "id": 1,
-            "info": bob,
+            "user": bob,
         }
     });
     assert_eq!(socket2.recv().await?, bob_info);

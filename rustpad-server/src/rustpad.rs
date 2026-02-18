@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
-use axum::extract::ws::{Message, WebSocket};
-use futures::prelude::*;
+use axum::extract::ws::Message;
 use operational_transform::OperationSeq;
 use serde::{Deserialize, Serialize};
+use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, RwLock, broadcast};
-use tracing::{info, warn};
+use tracing::info;
 
+use crate::auth::User;
 use crate::{database::PersistedDocument, ot::transform_index};
 
 /// The main object representing a collaborative session.
@@ -27,12 +28,49 @@ pub struct Rustpad {
     killed: AtomicBool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// Unauthenticated user.
+    Anon,
+    /// Authenticated user without admin privileges.
+    User,
+    /// Authenticated user with admin privileges.
+    Admin,
+}
+impl Role {
+    pub fn can_access(self, visibility: Visibility) -> bool {
+        match visibility {
+            Visibility::Private => self == Role::Admin,
+            Visibility::Internal => self != Role::Anon,
+            Visibility::Public => true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OnlineUser {
+    pub name: String,
+    pub hue: u16,
+    pub role: Role,
+}
+impl From<User> for OnlineUser {
+    fn from(user: User) -> Self {
+        Self {
+            name: user.name,
+            hue: user.hue,
+            role: if user.admin { Role::Admin } else { Role::User },
+        }
+    }
+}
+
 /// Shared state involving multiple users, protected by a lock.
 struct State {
+    // TODO: track revisions per user and merge older operations
     operations: Vec<UserOperation>,
     text: String,
     meta: DocumentMeta,
-    users: HashMap<u64, UserInfo>,
+    users: HashMap<u64, OnlineUser>,
     cursors: HashMap<u64, CursorData>,
     dirty: bool,
 }
@@ -43,85 +81,12 @@ impl Default for State {
             text: String::new(),
             meta: DocumentMeta {
                 language: "markdown".to_string(),
-                limited: false,
+                visibility: Visibility::Public,
             },
             users: HashMap::new(),
             cursors: HashMap::new(),
             dirty: false,
         }
-    }
-}
-
-/// Metadata for a persisted document.
-#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
-pub struct DocumentMeta {
-    /// Language of the document for editor syntax highlighting.
-    pub language: String,
-    /// If accessible by external users.
-    pub limited: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct UserOperation {
-    id: u64,
-    operation: OperationSeq,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserInfo {
-    pub name: String,
-    pub hue: u16,
-    #[serde(default)]
-    pub admin: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct CursorData {
-    cursors: Vec<u32>,
-    selections: Vec<(u32, u32)>,
-}
-
-/// A message received from the client over WebSocket.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum ClientMsg {
-    /// Represents a sequence of local edits from the user.
-    Edit {
-        revision: usize,
-        operation: OperationSeq,
-    },
-    /// Sets the metadata of the editor.
-    SetMeta {
-        language: Option<String>,
-        limited: Option<bool>,
-    },
-    /// Sets the user's current information.
-    ClientInfo(UserInfo),
-    /// Sets the user's cursor and selection positions.
-    CursorData(CursorData),
-}
-
-/// A message sent to the client over WebSocket.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum ServerMsg {
-    /// Informs the client of their unique socket ID and admin status.
-    Identity { id: u64, info: Option<UserInfo> },
-    /// Broadcasts text operations to all clients.
-    History {
-        start: usize,
-        operations: Vec<UserOperation>,
-    },
-    /// Broadcasts the current metadata, last writer wins.
-    Meta { language: String, limited: bool },
-    /// Broadcasts a user's information, or `None` on disconnect.
-    UserInfo { id: u64, info: Option<UserInfo> },
-    /// Broadcasts a user's cursor position.
-    UserCursor { id: u64, data: CursorData },
-}
-
-impl From<ServerMsg> for Message {
-    fn from(msg: ServerMsg) -> Self {
-        let serialized = serde_json::to_string(&msg).expect("failed serialize");
-        Message::text(serialized)
     }
 }
 
@@ -155,15 +120,44 @@ impl Rustpad {
         }
         rustpad
     }
-    /// Handle a connection from a WebSocket.
-    pub async fn on_connection(&self, mut socket: WebSocket, user: Option<UserInfo>) {
+
+    pub async fn init_connection(&self, user: Option<User>) -> (u64, usize, Vec<ServerMsg>) {
         let id = self.count.fetch_add(1, Ordering::Relaxed);
-        info!("connection id={id}");
-        if let Err(e) = self.handle_connection(id, &mut socket, user).await {
-            warn!("connection terminated early: {e}");
-            socket.close().await.ok();
+        info!("initializing connection id={id}");
+
+        let mut messages = Vec::new();
+        messages.push(
+            ServerMsg::Identity {
+                id: id,
+                info: user.map(|u| u.into()),
+            }
+            .into(),
+        );
+        let state = self.state.read().await;
+        messages.push(ServerMsg::Meta(state.meta.clone()).into());
+        if !state.operations.is_empty() {
+            messages.push(ServerMsg::History {
+                start: 0,
+                operations: state.operations.clone(),
+            });
         }
-        socket.close().await.ok();
+        for (&id, info) in &state.users {
+            messages.push(ServerMsg::UserInfo {
+                id,
+                user: info.clone(),
+            });
+        }
+        for (&id, data) in &state.cursors {
+            messages.push(ServerMsg::UserCursor {
+                id,
+                data: data.clone(),
+            });
+        }
+        let revision = state.operations.len();
+        (id, revision, messages)
+    }
+
+    pub async fn close_connection(&self, id: u64) {
         info!("disconnection, id = {id}");
         {
             let mut state = self.state.write().await;
@@ -171,14 +165,20 @@ impl Rustpad {
             state.cursors.remove(&id);
         }
 
-        self.update
-            .send(ServerMsg::UserInfo { id, info: None })
-            .ok();
+        self.update.send(ServerMsg::UserDisconnect { id }).ok();
     }
 
-    pub async fn is_limited(&self) -> bool {
+    pub fn notified(&self) -> Notified<'_> {
+        self.notify.notified()
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ServerMsg> {
+        self.update.subscribe()
+    }
+
+    pub async fn visibility(&self) -> Visibility {
         let state = self.state.read().await;
-        state.meta.limited
+        state.meta.visibility.clone()
     }
 
     /// Returns a snapshot of the current document for persistence.
@@ -234,92 +234,7 @@ impl Rustpad {
         self.killed.load(Ordering::Relaxed)
     }
 
-    async fn handle_connection(
-        &self,
-        id: u64,
-        socket: &mut WebSocket,
-        user: Option<UserInfo>,
-    ) -> Result<()> {
-        let mut update_rx = self.update.subscribe();
-
-        let mut revision: usize = self.send_initial(id, socket, user.clone()).await?;
-        let is_admin = user.as_ref().is_some_and(|u| u.admin);
-
-        loop {
-            // In order to avoid the "lost wakeup" problem, we first request a
-            // notification, **then** check the current state for new revisions.
-            // This is the same approach that `tokio::sync::watch` takes.
-            let notified = self.notify.notified();
-            if self.killed() {
-                break;
-            }
-            if !is_admin && self.is_limited().await {
-                info!("disconnecting non-admin user from closed document");
-                break;
-            }
-            if self.revision().await > revision {
-                revision = self.send_history(revision, socket).await?
-            }
-
-            tokio::select! {
-                _ = notified => {}
-                update = update_rx.recv() => {
-                    socket.send(update?.into()).await?;
-                }
-                result = socket.next() => {
-                    match result {
-                        None => break,
-                        Some(message) => {
-                            self.handle_message(id, message?, &user).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn send_initial(
-        &self,
-        id: u64,
-        socket: &mut WebSocket,
-        info: Option<UserInfo>,
-    ) -> Result<usize> {
-        socket.send(ServerMsg::Identity { id, info }.into()).await?;
-        let mut messages = Vec::new();
-        let revision = {
-            let state = self.state.read().await;
-            messages.push(ServerMsg::Meta {
-                language: state.meta.language.clone(),
-                limited: state.meta.limited,
-            });
-            if !state.operations.is_empty() {
-                messages.push(ServerMsg::History {
-                    start: 0,
-                    operations: state.operations.clone(),
-                });
-            }
-            for (&id, info) in &state.users {
-                messages.push(ServerMsg::UserInfo {
-                    id,
-                    info: Some(info.clone()),
-                });
-            }
-            for (&id, data) in &state.cursors {
-                messages.push(ServerMsg::UserCursor {
-                    id,
-                    data: data.clone(),
-                });
-            }
-            state.operations.len()
-        };
-        for msg in messages {
-            socket.send(msg.into()).await?;
-        }
-        Ok(revision)
-    }
-
-    async fn send_history(&self, start: usize, socket: &mut WebSocket) -> Result<usize> {
+    pub async fn send_history(&self, start: usize) -> Result<(usize, ServerMsg)> {
         let operations = {
             let state = self.state.read().await;
             let len = state.operations.len();
@@ -330,24 +245,28 @@ impl Rustpad {
             }
         };
         let num_ops = operations.len();
-        if num_ops > 0 {
-            let msg = ServerMsg::History { start, operations };
-            socket.send(msg.into()).await?;
-        }
-        Ok(start + num_ops)
+        Ok((start + num_ops, ServerMsg::History { start, operations }))
     }
 
-    async fn handle_message(
+    pub async fn update_user(&self, user: OnlineUser) {
+        let mut state = self.state.write().await;
+        for (&id, existing_user) in state.users.iter_mut() {
+            if existing_user.name == user.name {
+                *existing_user = user.clone();
+                drop(state);
+                self.update.send(ServerMsg::UserInfo { id, user }).ok();
+                break;
+            }
+        }
+    }
+
+    pub async fn handle_message(
         &self,
         id: u64,
-        message: Message,
-        user: &Option<UserInfo>,
+        message: ClientMsg,
+        user: &Option<User>,
     ) -> Result<()> {
-        let msg: ClientMsg = match message.to_text() {
-            Ok(text) => serde_json::from_str(text).context("failed to deserialize message")?,
-            Err(_) => return Ok(()), // Ignore non-text messages
-        };
-        match msg {
+        match message {
             ClientMsg::Edit {
                 revision,
                 operation,
@@ -357,39 +276,40 @@ impl Rustpad {
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
-            ClientMsg::SetMeta { language, limited } => {
+            ClientMsg::SetMeta {
+                language,
+                visibility,
+            } => {
                 let mut state = self.state.write().await;
                 if let Some(language) = language.clone() {
                     state.meta.language = language;
                 }
-                let language = state.meta.language.clone();
-                if let Some(limited) = limited {
-                    state.meta.limited = limited;
-                    if limited {
-                        info!("document is now limited, disconnecting non-admin users");
+                if let Some(visibility) = visibility {
+                    let old_visibility = state.meta.visibility;
+                    state.meta.visibility = visibility;
+                    if visibility < old_visibility {
+                        info!("document is now private, disconnecting non-admin users");
                         self.notify.notify_waiters();
                     }
                 }
-                let limited = state.meta.limited;
+                let meta = state.meta.clone();
                 state.dirty = true;
                 drop(state);
-                self.update.send(ServerMsg::Meta { language, limited }).ok();
+                self.update.send(ServerMsg::Meta(meta)).ok();
             }
-            ClientMsg::ClientInfo(mut info) => {
-                // Ensure clients can't lie about being admins
-                if let Some(user) = user {
-                    info.admin = user.admin;
-                    if info.admin {
-                        // Admins cannot change their name
-                        info.name = user.name.clone();
-                    }
-                }
-                info.hue %= 360;
-                self.state.write().await.users.insert(id, info.clone());
-                let msg = ServerMsg::UserInfo {
-                    id,
-                    info: Some(info),
+            ClientMsg::ClientInfo { name, hue } => {
+                let mut new = OnlineUser {
+                    name,
+                    hue: hue % 360,
+                    role: Role::Anon,
                 };
+                // Ensure clients can't lie
+                if let Some(user) = user {
+                    new.name = user.name.clone();
+                    new.role = if user.admin { Role::Admin } else { Role::User };
+                }
+                self.state.write().await.users.insert(id, new.clone());
+                let msg = ServerMsg::UserInfo { id, user: new };
                 self.update.send(msg).ok();
             }
             ClientMsg::CursorData(data) => {
@@ -435,5 +355,83 @@ impl Rustpad {
         state.text = new_text;
         state.dirty = true;
         Ok(())
+    }
+}
+
+/// Metadata for a persisted document.
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
+pub struct DocumentMeta {
+    /// Language of the document for editor syntax highlighting.
+    pub language: String,
+    /// If accessible by external users.
+    pub visibility: Visibility,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    /// Document is only accessible by admins.
+    Private,
+    /// Document is only accessible by authenticated users.
+    Internal,
+    /// Document is accessible by anyone with the link.
+    Public,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserOperation {
+    pub id: u64,
+    pub operation: OperationSeq,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CursorData {
+    pub cursors: Vec<u32>,
+    pub selections: Vec<(u32, u32)>,
+}
+
+/// A message received from the client over WebSocket.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ClientMsg {
+    /// Represents a sequence of local edits from the user.
+    Edit {
+        revision: usize,
+        operation: OperationSeq,
+    },
+    /// Sets the metadata of the editor.
+    SetMeta {
+        language: Option<String>,
+        visibility: Option<Visibility>,
+    },
+    /// Sets the user's current information.
+    ClientInfo { name: String, hue: u16 },
+    /// Sets the user's cursor and selection positions.
+    CursorData(CursorData),
+}
+
+/// A message sent to the client over WebSocket.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerMsg {
+    /// Informs the client of their unique socket ID and admin status.
+    Identity { id: u64, info: Option<OnlineUser> },
+    /// Broadcasts text operations to all clients.
+    History {
+        start: usize,
+        operations: Vec<UserOperation>,
+    },
+    /// Broadcasts the current metadata, last writer wins.
+    Meta(DocumentMeta),
+    /// Broadcasts a user's information.
+    UserInfo { id: u64, user: OnlineUser },
+    /// Broadcasts a user's disconnection.
+    UserDisconnect { id: u64 },
+    /// Broadcasts a user's cursor position.
+    UserCursor { id: u64, data: CursorData },
+}
+
+impl From<ServerMsg> for Message {
+    fn from(msg: ServerMsg) -> Self {
+        let serialized = serde_json::to_string(&msg).expect("failed serialize");
+        Message::text(serialized)
     }
 }

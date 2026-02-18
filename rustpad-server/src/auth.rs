@@ -20,7 +20,6 @@ use tracing::{error, info};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::rustpad::UserInfo;
 use crate::util::{AppError, Identifier, Session};
 
 /// Time after which a login attempt expires if not completed.
@@ -31,17 +30,9 @@ pub const LOGGEDIN_EXPIRE_SEC: u64 = 2 * 24 * 60 * 60;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub name: String,
-    pub admin: bool,
     pub hue: u16,
-}
-impl From<User> for UserInfo {
-    fn from(user: User) -> Self {
-        Self {
-            name: user.name,
-            hue: user.hue,
-            admin: user.admin,
-        }
-    }
+    #[serde(default)]
+    pub admin: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -126,6 +117,19 @@ impl UserSessions {
             return None;
         }
         Some(user.clone())
+    }
+
+    pub async fn update_user(&self, session: &Session, user: User) {
+        if let Some(mut login_state) = self.sessions.get_mut(session) {
+            let AuthState::LoggedIn { user: existing_user, expires_at } = &mut *login_state else {
+                return;
+            };
+            if *expires_at < Instant::now() {
+                self.sessions.remove(session);
+                return;
+            }
+            *existing_user = user;
+        }
     }
 }
 

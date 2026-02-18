@@ -6,30 +6,32 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
+use axum::extract::ws::Message;
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use dashmap::{DashMap, Entry};
+use futures::SinkExt;
 use rand::random_range;
 use serde::Serialize;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 use tokio::time::{self, Instant};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 mod auth;
 pub mod database;
 use database::Database;
 mod ot;
-mod rustpad;
+pub mod rustpad;
 use rustpad::Rustpad;
 mod util;
 use tower_http::services::{ServeDir, ServeFile};
 use util::Identifier;
 
 use crate::auth::User;
-use crate::rustpad::UserInfo;
+use crate::rustpad::{ClientMsg, Role, Visibility};
 use crate::util::{AppError, Session};
 
 /// An entry stored in the global server map.
@@ -55,8 +57,12 @@ impl Drop for Document {
     }
 }
 
-/// The shared state of the server, accessible from within request handlers.
+#[derive(Debug, Clone)]
+enum GlobalMsg {
+    UserUpdate(User),
+}
 
+/// The shared state of the server, accessible from within request handlers.
 pub struct ServerState {
     /// Concurrent map storing in-memory documents.
     documents: DashMap<Identifier, Document>,
@@ -68,6 +74,8 @@ pub struct ServerState {
     notify_persister: Notify,
     /// System time when the server started, in seconds since Unix epoch.
     start_time: SystemTime,
+    /// Broadcast channel for global messages like user updates
+    update: broadcast::Sender<GlobalMsg>,
 }
 impl ServerState {
     /// Construct a new server configuration.
@@ -82,6 +90,7 @@ impl ServerState {
             documents: DashMap::new(),
             notify_persister: Notify::new(),
             start_time: SystemTime::now(),
+            update: broadcast::channel(16).0,
         })
     }
     /// Construct a new server configuration with a temporary database for testing.
@@ -92,6 +101,7 @@ impl ServerState {
             documents: DashMap::new(),
             notify_persister: Notify::new(),
             start_time: SystemTime::now(),
+            update: broadcast::channel(16).0,
         })
     }
     /// Load server configuration from environment variables.
@@ -163,23 +173,26 @@ async fn socket_handler(
         None
     };
 
-    let is_admin = user.as_ref().map(|u| u.admin).unwrap_or(false);
+    let role = user
+        .as_ref()
+        .map(|u| if u.admin { Role::Admin } else { Role::User })
+        .unwrap_or(Role::Anon);
 
     info!("socket connection for id = {id}");
 
     let mut entry = match state.documents.entry(id.clone()) {
         Entry::Occupied(e) => {
             let document = e.into_ref();
-            if document.rustpad.is_limited().await && !is_admin {
-                info!("denying access to closed document {id}");
+            if !role.can_access(document.rustpad.visibility().await) {
+                info!("denying access to limited document {id}");
                 return Ok(StatusCode::FORBIDDEN.into_response());
             }
             document
         }
         Entry::Vacant(e) => {
             let rustpad = if let Ok(document) = state.database.load_document(&id).await {
-                if document.meta.limited && !is_admin {
-                    info!("denying access to closed document {id}");
+                if !role.can_access(document.meta.visibility) {
+                    info!("denying access to limited document {id}");
                     return Ok(StatusCode::FORBIDDEN.into_response());
                 }
 
@@ -194,15 +207,125 @@ async fn socket_handler(
         }
     };
 
-    let value = entry.value_mut();
-    let rustpad = Arc::clone(&value.rustpad);
-    value.last_accessed = Instant::now();
-    let upgrade = ws.on_upgrade(async move |socket| {
-        rustpad
-            .on_connection(socket, user.map(UserInfo::from))
-            .await
-    });
+    let rustpad = {
+        let value = entry.value_mut();
+        value.last_accessed = Instant::now();
+        value.rustpad.clone()
+    };
+    let state = state.clone();
+    let id = id.clone();
+    let upgrade =
+        ws.on_upgrade(move |socket| websocket_connection(id, rustpad, socket, state, session));
     Ok(upgrade.into_response())
+}
+
+async fn websocket_connection(
+    doc_id: Identifier,
+    rustpad: Arc<Rustpad>,
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<ServerState>,
+    session: Option<Session>,
+) {
+    let mut user = if let Some(session) = &session {
+        state.get_user(session).await
+    } else {
+        None
+    };
+    let role = user
+        .as_ref()
+        .map(|u| if u.admin { Role::Admin } else { Role::User })
+        .unwrap_or(Role::Anon);
+
+    let (user_id, mut revision, messages) = rustpad.init_connection(user.clone()).await;
+    // TODO: use try block if stable
+    let result = async |
+        doc_id,
+        rustpad: Arc<Rustpad>,
+        socket: &mut axum::extract::ws::WebSocket,
+        state: Arc<ServerState>,
+        session
+    | -> anyhow::Result<()> {
+        for message in messages {
+            debug!("socket {doc_id} - {user_id} -> {message:?}");
+            socket.send(message.into()).await?;
+        }
+
+        let mut global_update_rx = state.update.subscribe();
+        let mut doc_update_rx = rustpad.subscribe();
+
+        loop {
+            // In order to avoid the "lost wakeup" problem, we first request a
+            // notification, **then** check the current state for new revisions.
+            // This is the same approach that `tokio::sync::watch` takes.
+            let notified = rustpad.notified();
+
+            if rustpad.killed() {
+                break;
+            }
+            if !role.can_access(rustpad.visibility().await) {
+                info!("{doc_id} disconnecting users without permission");
+                break;
+            }
+            if rustpad.revision().await > revision {
+                let (new_revision, message) = rustpad.send_history(revision).await?;
+                revision = new_revision;
+                debug!("socket {doc_id} - {user_id} -> {message:?}");
+                socket.send(message.into()).await?;
+            }
+
+            tokio::select! {
+                _ = notified => {}
+                update = global_update_rx.recv() => {
+                    match update? {
+                        GlobalMsg::UserUpdate(updated_user) => {
+                            if let Some(user) = &mut user && user.name == updated_user.name {
+                                info!("updating user {} info for document {doc_id}", user.name);
+                                *user = updated_user;
+                                rustpad.update_user(user.clone().into()).await;
+                            }
+                        }
+                    }
+                }
+                update = doc_update_rx.recv() => {
+                    let message = update?;
+                    debug!("socket {doc_id} - {user_id} -> {message:?}");
+                    socket.send(message.into()).await?;
+                }
+                result = socket.recv() => match result {
+                    None => break,
+                    Some(Ok(Message::Text(message))) => {
+                        let message = serde_json::from_str(&message).context("Failed to parse JSON message")?;
+                        debug!("socket {doc_id} - {user_id} <- {message:?}");
+                        if let Some(user) = &mut user && let ClientMsg::ClientInfo { hue, .. } = &message {
+                            user.hue = *hue;
+                            if let Some(session) = &session && let Some(users) = &state.users {
+                                // Update user info in session store as well
+                                users.update_user(session, user.clone()).await;
+                                state.update.send(GlobalMsg::UserUpdate(user.clone())).ok();
+                            }
+                        }
+                        rustpad.handle_message(user_id, message, &user).await?;
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(m)) => {
+                        debug!("socket {doc_id} - {user_id} received unsupported message: {m:?}");
+                    }
+                    Some(Err(e)) => {
+                        error!("Error receiving websocket message for document {doc_id}: {e:?}");
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }(doc_id.clone(), rustpad.clone(), &mut socket, state, session).await;
+
+    rustpad.close_connection(user_id).await;
+    socket.close().await.ok();
+
+    if let Err(e) = result {
+        error!("Error in websocket connection for document {doc_id}: {e:?}");
+    }
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
@@ -217,13 +340,13 @@ async fn text_handler(
     };
     if let Some(document) = document {
         info!(
-            "text request for id = {id}, limited = {}",
-            document.meta.limited
+            "text request for id = {id}, visibility = {:?}",
+            document.meta.visibility
         );
-        if document.meta.limited {
+        if document.meta.visibility != Visibility::Public {
             if let Some(session) = &session
                 && let Some(user) = state.get_user(session).await
-                && user.admin
+                && (document.meta.visibility == Visibility::Internal || user.admin)
             {
                 info!("access {} -> {id}", user.name);
             } else {

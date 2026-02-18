@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
-use crate::{Identifier, rustpad::DocumentMeta};
+use crate::Identifier;
+use crate::rustpad::{DocumentMeta, Visibility};
 
 /// Represents a document persisted in database storage.
 #[derive(PartialEq, Eq, Clone, Debug)]
@@ -21,9 +22,12 @@ pub struct PersistedDocument {
 }
 impl PersistedDocument {
     /// Create a new persisted document with the given text and language.
-    pub fn new(text: String, language: String, limited: bool) -> Self {
+    pub fn new(text: String, language: String, visibility: Visibility) -> Self {
         Self {
-            meta: DocumentMeta { language, limited },
+            meta: DocumentMeta {
+                language,
+                visibility,
+            },
             text,
         }
     }

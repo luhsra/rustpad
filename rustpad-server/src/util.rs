@@ -9,8 +9,8 @@ use axum::{
 use axum_extra::{TypedHeader, headers, typed_header::TypedHeaderRejectionReason};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as base64engine;
-use tracing::{error, info, warn};
 use rand::random;
+use tracing::{error, warn};
 
 use crate::auth::LOGGEDIN_EXPIRE_SEC;
 
@@ -103,7 +103,6 @@ impl Session {
         Self(random())
     }
     fn from_cookie(cookie: &str) -> Option<Self> {
-        info!("parsing session cookie: {cookie}");
         let decoded = base64engine.decode(cookie).ok()?;
         let buf = decoded.try_into().ok()?;
         Some(Self(buf))

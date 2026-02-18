@@ -3,11 +3,11 @@ use std::net::SocketAddr;
 use anyhow::{Result, anyhow};
 use axum::http::StatusCode;
 use futures::{SinkExt, StreamExt};
-use tracing::info;
 use openidconnect::reqwest;
 use serde_json::Value;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tower_http::trace::TraceLayer;
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// A test WebSocket client that sends and receives JSON messages.
@@ -29,10 +29,13 @@ impl JsonSocket {
     }
 
     pub async fn recv_closed(&mut self) -> Result<()> {
-        if let Some(Ok(Message::Close(_))) = self.0.next().await {
-            Ok(())
-        } else {
-            Err(anyhow!("WebSocket should be closed"))
+        match self.0.next().await {
+            None => Ok(()),
+            Some(Ok(Message::Close(_))) => Ok(()),
+            Some(Ok(m)) => Err(anyhow!(
+                "Expected WebSocket to be closed, but got message: {m:?}"
+            )),
+            Some(Err(e)) => Err(anyhow!("WebSocket error: {e:?}")),
         }
     }
 }

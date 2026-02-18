@@ -14,20 +14,34 @@ const wasmBuffer = typeof Bun !== "undefined"
 export type RustpadOptions = {
   readonly uri: string;
   readonly editor: editor.IStandaloneCodeEditor;
-  readonly onConnected?: (info?: UserInfo) => void;
+  readonly onConnected?: (info?: OnlineUser) => void;
   readonly onDisconnected?: () => void;
   readonly onDesynchronized?: () => void;
   readonly onError?: (error: Event) => void;
-  readonly onChangeMeta?: (language: string, limited: boolean) => void;
-  readonly onChangeUsers?: (users: Record<number, UserInfo>) => void;
+  readonly onChangeMeta?: (language: string, visibility: Visibility) => void;
+  readonly onChangeUsers?: (users: Record<number, OnlineUser>) => void;
+  readonly onChangeMe?: (info: OnlineUser) => void;
   readonly reconnectInterval?: number;
 };
 
+export type UserRole = "admin" | "user" | "anon";
+export type Visibility = "public" | "internal" | "private";
+
+export function canAccess(role: UserRole, visibility: Visibility): boolean {
+  if (visibility === "public") {
+    return true;
+  } else if (visibility === "internal") {
+    return role !== "anon";
+  } else {
+    return role === "admin";
+  }
+}
+
 /** A user currently editing the document. */
-export type UserInfo = {
+export type OnlineUser = {
   readonly name: string;
   readonly hue: number;
-  readonly admin: boolean;
+  readonly role: UserRole;
 };
 
 /** Browser client for Rustpad. */
@@ -48,9 +62,8 @@ class Rustpad {
   private revision: number = 0;
   private outstanding?: OpSeq;
   private buffer?: OpSeq;
-  private users: Record<number, UserInfo> = {};
-  private userCursors: Record<number, CursorData> = {};
-  private myInfo?: UserInfo;
+  private users: Map<number, { info: OnlineUser, cursor: CursorData }> = new Map();
+  private myInfo?: OnlineUser;
   private cursorData: CursorData = { cursors: [], selections: [] };
 
   // Intermittent local editor state
@@ -106,15 +119,14 @@ class Rustpad {
   }
 
   /** Try to set the metadata of the editor, if connected. */
-  setMeta(language?: string, limited?: boolean): boolean {
-    this.ws?.send(JSON.stringify({ SetMeta: { language, limited } }));
+  setMeta(language?: string, visibility?: Visibility): boolean {
+    this.send({ SetMeta: { language, visibility } });
     return this.ws !== undefined;
   }
 
   /** Set the user's information. */
-  setInfo(info: UserInfo) {
-    // Don't allow users to set their own admin status
-    this.myInfo = { ...info, admin: this.myInfo?.admin ?? false };
+  setInfo(info: OnlineUser) {
+    this.myInfo = info;
     this.sendInfo();
   }
 
@@ -139,8 +151,8 @@ class Rustpad {
       this.connecting = false;
       this.ws = ws;
       // Trigger connection handler later after receiving identity message
-      this.users = {};
-      this.options.onChangeUsers?.(this.users);
+      this.users.clear();
+      this.options.onChangeUsers?.(Object.fromEntries(this.users.entries().map(([id, u]) => [id, u.info])));
       this.sendInfo();
       this.sendCursorData();
       if (this.outstanding) {
@@ -199,28 +211,35 @@ class Rustpad {
         }
       }
     } else if (msg.Meta !== undefined) {
-      this.options.onChangeMeta?.(msg.Meta.language, msg.Meta.limited);
+      this.options.onChangeMeta?.(msg.Meta.language, msg.Meta.visibility);
     } else if (msg.UserInfo !== undefined) {
-      const { id, info } = msg.UserInfo;
+      const { id, user } = msg.UserInfo;
       if (id !== this.me) {
-        this.users = { ...this.users };
-        if (info) {
-          this.users[id] = info;
-        } else {
-          delete this.users[id];
-          delete this.userCursors[id];
-        }
+        this.users.set(id, { info: user, cursor: { cursors: [], selections: [] } });
         this.updateCursors();
-        this.options.onChangeUsers?.(this.users);
-      } else if (info == null) {
+        this.options.onChangeUsers?.(Object.fromEntries(this.users.entries().map(([id, u]) => [id, u.info])));
+      } else {
+        this.myInfo = user;
+        this.options.onChangeMe?.(user);
+      }
+    } else if (msg.UserDisconnect !== undefined) {
+      const { id } = msg.UserDisconnect;
+      if (id !== this.me) {
+        this.users.delete(id);
+        this.updateCursors();
+        this.options.onChangeUsers?.(Object.fromEntries(this.users.entries().map(([id, u]) => [id, u.info])));
+      } else {
         // Disconnection, can happen if user document becomes private
         this.ws?.close();
       }
     } else if (msg.UserCursor !== undefined) {
       const { id, data } = msg.UserCursor;
       if (id !== this.me) {
-        this.userCursors[id] = data;
-        this.updateCursors();
+        let user = this.users.get(id);
+        if (user) {
+          user.cursor = data;
+          this.updateCursors();
+        }
       }
     }
   }
@@ -265,19 +284,24 @@ class Rustpad {
 
   private sendOperation(operation: OpSeq) {
     const op = operation.to_string();
-    this.ws?.send(`{"Edit":{"revision":${this.revision},"operation":${op}}}`);
+    this.send({ Edit: { revision: this.revision, operation: JSON.parse(op) } });
   }
 
   private sendInfo() {
     if (this.myInfo) {
-      this.ws?.send(`{"ClientInfo":${JSON.stringify(this.myInfo)}}`);
+      this.send({ ClientInfo: this.myInfo });
     }
   }
 
   private sendCursorData() {
     if (!this.buffer) {
-      this.ws?.send(`{"CursorData":${JSON.stringify(this.cursorData)}}`);
+      this.send({ CursorData: this.cursorData });
     }
+  }
+
+  private send(msg: ClientMsg) {
+    console.debug("sending message", msg);
+    this.ws?.send(JSON.stringify(msg));
   }
 
   private applyOperation(operation: OpSeq) {
@@ -342,7 +366,7 @@ class Rustpad {
   }
 
   private transformCursors(operation: OpSeq) {
-    for (const data of Object.values(this.userCursors)) {
+    for (const data of this.users.values().map((u) => u.cursor)) {
       data.cursors = data.cursors.map((c) => operation.transform_index(c));
       data.selections = data.selections.map(([s, e]) => [
         operation.transform_index(s),
@@ -355,48 +379,45 @@ class Rustpad {
   private updateCursors() {
     const decorations: editor.IModelDeltaDecoration[] = [];
 
-    for (const [id, data] of Object.entries(this.userCursors)) {
-      if (id in this.users) {
-        const { hue, name } = this.users[id as any]!;
-        console.info("updating cursor for user", name, "with hue", hue);
-        generateCssStyles(hue);
+    for (const [id, data] of this.users.entries()) {
+      const { hue, name } = data.info;
+      generateCssStyles(hue);
 
-        for (const cursor of data.cursors) {
-          const position = unicodePosition(this.model, cursor);
-          decorations.push({
-            options: {
-              className: `remote-cursor-${hue}`,
-              stickiness: 1,
-              zIndex: 2,
+      for (const cursor of data.cursor.cursors) {
+        const position = unicodePosition(this.model, cursor);
+        decorations.push({
+          options: {
+            className: `remote-cursor-${hue}`,
+            stickiness: 1,
+            zIndex: 2,
+          },
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          },
+        });
+      }
+      for (const selection of data.cursor.selections) {
+        const position = unicodePosition(this.model, selection[0]);
+        const positionEnd = unicodePosition(this.model, selection[1]);
+        decorations.push({
+          options: {
+            className: `remote-selection-${hue}`,
+            hoverMessage: {
+              value: name,
             },
-            range: {
-              startLineNumber: position.lineNumber,
-              startColumn: position.column,
-              endLineNumber: position.lineNumber,
-              endColumn: position.column,
-            },
-          });
-        }
-        for (const selection of data.selections) {
-          const position = unicodePosition(this.model, selection[0]);
-          const positionEnd = unicodePosition(this.model, selection[1]);
-          decorations.push({
-            options: {
-              className: `remote-selection-${hue}`,
-              hoverMessage: {
-                value: name,
-              },
-              stickiness: 1,
-              zIndex: 1,
-            },
-            range: {
-              startLineNumber: position.lineNumber,
-              startColumn: position.column,
-              endLineNumber: positionEnd.lineNumber,
-              endColumn: positionEnd.column,
-            },
-          });
-        }
+            stickiness: 1,
+            zIndex: 1,
+          },
+          range: {
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: positionEnd.lineNumber,
+            endColumn: positionEnd.column,
+          },
+        });
       }
     }
 
@@ -463,10 +484,26 @@ type CursorData = {
   selections: [number, number][];
 };
 
+type ClientMsg = {
+  Edit?: {
+    revision: number;
+    operation: any;
+  };
+  SetMeta?: {
+    language?: string;
+    visibility?: Visibility;
+  };
+  ClientInfo?: {
+    name: string;
+    hue: number;
+  };
+  CursorData?: CursorData;
+};
+
 type ServerMsg = {
   Identity?: {
     id: number;
-    info: UserInfo;
+    info?: OnlineUser;
   };
   History?: {
     start: number;
@@ -474,11 +511,14 @@ type ServerMsg = {
   };
   Meta?: {
     language: string;
-    limited: boolean;
+    visibility: Visibility;
   };
   UserInfo?: {
     id: number;
-    info: UserInfo | null;
+    user: OnlineUser;
+  };
+  UserDisconnect?: {
+    id: number;
   };
   UserCursor?: {
     id: number;
