@@ -5,15 +5,20 @@ use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
 use dashmap::DashMap;
 use openidconnect::core::{
-    CoreAuthenticationFlow, CoreClient, CoreGenderClaim, CoreIdTokenClaims, CoreIdTokenVerifier,
-    CoreProviderMetadata,
+    CoreAuthDisplay, CoreAuthPrompt, CoreAuthenticationFlow, CoreClaimName, CoreClaimType,
+    CoreClientAuthMethod, CoreErrorResponseType, CoreGenderClaim, CoreGrantType,
+    CoreIdTokenVerifier, CoreJsonWebKey, CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm, CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType,
+    CoreRevocableToken, CoreRevocationErrorResponse, CoreSubjectIdentifierType,
+    CoreTokenIntrospectionResponse, CoreTokenType,
 };
-use openidconnect::{AccessTokenHash, AdditionalClaims, UserInfoClaims};
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
-    RedirectUrl, Scope,
+    AccessTokenHash, AdditionalClaims, AdditionalProviderMetadata, AuthorizationCode, Client,
+    ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields, EndpointMaybeSet, EndpointNotSet,
+    EndpointSet, IdTokenClaims, IdTokenFields, IssuerUrl, Nonce, OAuth2TokenResponse,
+    PkceCodeChallenge, PkceCodeVerifier, ProviderMetadata, RedirectUrl, RevocationUrl, Scope,
+    StandardErrorResponse, StandardTokenResponse, reqwest,
 };
-use openidconnect::{EndpointMaybeSet, EndpointNotSet, EndpointSet, reqwest};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
@@ -44,10 +49,11 @@ pub struct OpenIdConfig {
     admin_group: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum AuthState {
     LoggingIn {
         csrf_token: CsrfToken,
+        pkce_verifier: PkceCodeVerifier,
         nonce: Nonce,
         expires_at: Instant,
         redirect: Option<Identifier>,
@@ -61,13 +67,24 @@ enum AuthState {
 #[derive(Debug)]
 pub struct UserSessions {
     sessions: DashMap<Session, AuthState>,
-    client: CoreClient<
-        EndpointSet,      // AuthUrl
-        EndpointNotSet,   // DeviceAuthUrl
-        EndpointNotSet,   // IntrospectionUrl
-        EndpointNotSet,   // RevocationUrl
-        EndpointMaybeSet, // TokenUrl
-        EndpointMaybeSet, // UserInfoUrl
+    client: Client<
+        GitLabTokenClaims,
+        CoreAuthDisplay,
+        CoreGenderClaim,
+        CoreJweContentEncryptionAlgorithm,
+        CoreJsonWebKey,
+        CoreAuthPrompt,
+        StandardErrorResponse<CoreErrorResponseType>,
+        StandardTokenResponse<GitLabIdTokenFields, CoreTokenType>,
+        CoreTokenIntrospectionResponse,
+        CoreRevocableToken,
+        CoreRevocationErrorResponse,
+        EndpointSet,      // HasAuthUrl,
+        EndpointNotSet,   // HasDeviceAuthUrl,
+        EndpointNotSet,   // HasIntrospectionUrl,
+        EndpointSet,      // HasRevocationUrl,
+        EndpointMaybeSet, // HasTokenUrl,
+        EndpointMaybeSet, // HasUserInfoUrl,
     >,
     http_client: reqwest::Client,
     admin_group: String,
@@ -84,20 +101,26 @@ impl UserSessions {
             .context("Failed to build HTTP client")?;
 
         // Fetch OpenID Connect discovery document.
-        let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
-            .await
-            .context("Failed to discover OpenID Provider")?;
+        let provider_metadata =
+            ProviderMetadataWithRevocation::discover_async(issuer_url, &http_client)
+                .await
+                .context("Failed to discover OpenID Provider")?;
 
         let redirect_url = RedirectUrl::new(config.host_url + "/auth/authorized")
             .context("Invalid redirect URL")?;
 
         // Set up the config for the GitLab OAuth2 process.
-        let client = CoreClient::from_provider_metadata(
+        let revocation_url = provider_metadata
+            .additional_metadata()
+            .revocation_endpoint
+            .clone();
+        let client = Client::from_provider_metadata(
             provider_metadata,
             ClientId::new(config.client_id),
             Some(ClientSecret::new(config.client_secret)),
         )
-        .set_redirect_uri(redirect_url);
+        .set_redirect_uri(redirect_url)
+        .set_revocation_url(revocation_url);
 
         Ok(Self {
             client,
@@ -121,7 +144,11 @@ impl UserSessions {
 
     pub async fn update_user(&self, session: &Session, user: User) {
         if let Some(mut login_state) = self.sessions.get_mut(session) {
-            let AuthState::LoggedIn { user: existing_user, expires_at } = &mut *login_state else {
+            let AuthState::LoggedIn {
+                user: existing_user,
+                expires_at,
+            } = &mut *login_state
+            else {
                 return;
             };
             if *expires_at < Instant::now() {
@@ -157,6 +184,8 @@ pub async fn login(
 ) -> Result<impl IntoResponse, AppError> {
     let session = Session::new();
 
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
     // Generate the full authorization URL.
     let (auth_url, csrf_token, nonce) = users
         .client
@@ -167,8 +196,9 @@ pub async fn login(
         )
         // Set the desired scopes.
         .add_scope(Scope::new("openid".to_string()))
-        .add_scope(Scope::new("profile".to_string()))
-        .add_scope(Scope::new("email".to_string()))
+        // .add_scope(Scope::new("profile".to_string()))
+        // .add_scope(Scope::new("email".to_string()))
+        .set_pkce_challenge(pkce_challenge)
         .url();
 
     // Store the CSRF token and nonce in the logins map with an expiration time.
@@ -186,6 +216,7 @@ pub async fn login(
         session.clone(),
         AuthState::LoggingIn {
             csrf_token,
+            pkce_verifier,
             nonce,
             expires_at,
             redirect: query.redirect,
@@ -224,6 +255,7 @@ pub async fn authorized(
 
     let AuthState::LoggingIn {
         csrf_token,
+        pkce_verifier,
         nonce,
         expires_at,
         redirect,
@@ -246,6 +278,7 @@ pub async fn authorized(
         .client
         .exchange_code(code)
         .map_err(|e| err(Some(&e), "Failed to exchange code for token"))?
+        .set_pkce_verifier(pkce_verifier)
         .request_async(&users.http_client)
         .await
         .map_err(|e| err(Some(&e), "Failed to contact token endpoint"))?;
@@ -258,10 +291,10 @@ pub async fn authorized(
         .id_token()
         .ok_or_else(|| err(None, "Server did not return an ID token"))?;
 
-    let claims: &CoreIdTokenClaims = id_token
+    let claims: &GitLabIdTokenClaims = id_token
         .claims(&id_token_verifier, &nonce)
         .map_err(|e| err(Some(&e), "Failed to verify ID token"))?;
-    // info!("ID token claims: {claims:?}");
+    info!("ID token claims: {claims:?}");
 
     // Verify the access token hash to ensure that the access token hasn't been substituted for
     // another user's.
@@ -281,63 +314,48 @@ pub async fn authorized(
         }
     }
 
-    // Request the user info from the user info endpoint.
-    let userinfo_claims: UserInfoClaims<GitLabClaims, CoreGenderClaim> = users
-        .client
-        .user_info(token_response.access_token().to_owned(), None)
-        .map_err(|e| err(Some(&e), "No user info endpoint"))?
-        .request_async(&users.http_client)
-        .await
-        .map_err(|e| err(Some(&e), "Failed to request user info"))?;
-    info!("User info claims: {userinfo_claims:?}");
-
     // Create a new user session.
     let user = User {
         name: claims
             .preferred_username()
             .map(|s| s.to_string())
             .ok_or_else(|| err(None, "ID token is missing name claim"))?,
-        admin: userinfo_claims
+        admin: claims
             .additional_claims()
-            .groups
+            .groups_direct
             .contains(&users.admin_group),
         hue: rand::random_range(0..360),
     };
     info!("Authenticated user: {user:?}");
 
-    let redirect_url = if let Some(redirect) = redirect {
-        format!("/#{redirect}")
-    } else {
-        format!("/")
-    };
+    users
+        .client
+        .revoke_token(CoreRevocableToken::AccessToken(
+            token_response.access_token().clone(),
+        ))
+        .map_err(|e| err(Some(&e), "Failed to revoke access token"))?
+        .request_async(&users.http_client)
+        .await
+        .map_err(|e| err(Some(&e), "Failed to contact revocation endpoint"))?;
 
     users.sessions.retain(|_, state| match state {
         AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
         AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
     });
     users.sessions.insert(
-        session,
+        session.clone(),
         AuthState::LoggedIn {
             user: user.clone(),
             expires_at: Instant::now() + Duration::from_secs(LOGGEDIN_EXPIRE_SEC),
         },
     );
 
-    info!("Login successful -> {redirect_url}");
+    info!(
+        "Login successful -> {:?}",
+        redirect.as_ref().map(|r| r.as_ref())
+    );
 
-    Ok(Html(format!(
-        r#"
-        <html>
-            <head>
-                <meta http-equiv="refresh" content="0; URL={redirect_url}" />
-            </head>
-            <body>
-                <p>Login successful! Redirecting...</p>
-                <p>Or <a href="{redirect_url}">click here</a>.</p>
-            </body>
-        </html>
-        "#
-    )))
+    Ok(redirect_to_id(&redirect).into_response())
 }
 
 pub async fn logout(
@@ -350,17 +368,75 @@ pub async fn logout(
         AuthState::LoggingIn { expires_at, .. } => *expires_at > Instant::now(),
         AuthState::LoggedIn { expires_at, .. } => *expires_at > Instant::now(),
     });
-    let redirect_url = if let Some(redirect) = query.redirect {
-        format!("/#{redirect}")
-    } else {
-        "/".to_string()
-    };
-    Ok((session.delete_cookie(Redirect::to(&redirect_url))).into_response())
+    Ok(session
+        .delete_cookie(redirect_to_id(&query.redirect))
+        .into_response())
 }
 
+fn redirect_to_id(redirect: &Option<Identifier>) -> impl IntoResponse {
+    let redirect_url = if let Some(redirect) = redirect {
+        format!("/#{redirect}")
+    } else {
+        format!("/")
+    };
+    Html(format!(
+        r#"
+        <html>
+            <head>
+                <meta http-equiv="refresh" content="0; URL={redirect_url}" />
+            </head>
+            <body>
+                <p>Login successful! Redirecting...</p>
+                <p>Or <a href="{redirect_url}">click here</a>.</p>
+            </body>
+        </html>
+        "#
+    ))
+}
+
+/// Teach openidconnect about an extension to the OpenID Discovery response
+/// that we can use as the RFC 7009 OAuth 2.0 Token Revocation endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RevokationProviderMetadata {
+    revocation_endpoint: RevocationUrl,
+}
+impl AdditionalProviderMetadata for RevokationProviderMetadata {}
+
+type ProviderMetadataWithRevocation = ProviderMetadata<
+    RevokationProviderMetadata,
+    CoreAuthDisplay,
+    CoreClientAuthMethod,
+    CoreClaimName,
+    CoreClaimType,
+    CoreGrantType,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJweKeyManagementAlgorithm,
+    CoreJsonWebKey,
+    CoreResponseMode,
+    CoreResponseType,
+    CoreSubjectIdentifierType,
+>;
+
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 struct GitLabClaims {
     groups: Vec<String>,
 }
 
 impl AdditionalClaims for GitLabClaims {}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+struct GitLabTokenClaims {
+    groups_direct: Vec<String>,
+}
+impl AdditionalClaims for GitLabTokenClaims {}
+
+type GitLabIdTokenClaims = IdTokenClaims<GitLabTokenClaims, CoreGenderClaim>;
+
+type GitLabIdTokenFields = IdTokenFields<
+    GitLabTokenClaims,
+    EmptyExtraTokenFields,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;

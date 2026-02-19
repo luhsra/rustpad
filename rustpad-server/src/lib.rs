@@ -156,6 +156,7 @@ pub fn server(state: Arc<ServerState>) -> Router {
         .nest("/auth", auth::routes(state.users.clone()))
         .route_service("/", ServeFile::new("dist/index.html"))
         .fallback_service(ServeDir::new("dist"))
+        .layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.

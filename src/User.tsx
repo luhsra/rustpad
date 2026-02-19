@@ -47,7 +47,7 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const icon = icons[info.role];
   const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
 
-  const query = new URLSearchParams({ location: location.hash.slice(1) });
+  const query = new URLSearchParams({ redirect: location.hash.slice(1) });
   const login_url = "/auth/login?" + query.toString();
   const logout_url = "/auth/logout?" + query.toString();
 
