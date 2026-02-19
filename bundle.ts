@@ -3,6 +3,7 @@ import pkg from "./package.json";
 await Bun.build({
     entrypoints: [
         './index.html',
+        './new.html',
         './src/monaco/editor.worker.ts',
         './src/monaco/html.worker.ts',
         './src/monaco/json.worker.ts',

@@ -1,6 +1,4 @@
 //! Server backend for the Rustpad collaborative text editor.
-#![forbid(unsafe_code)]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -29,6 +27,7 @@ use rustpad::Rustpad;
 mod util;
 use tower_http::services::{ServeDir, ServeFile};
 use util::Identifier;
+mod collab;
 
 use crate::auth::User;
 use crate::rustpad::{ClientMsg, Role, Visibility};
@@ -66,6 +65,8 @@ enum GlobalMsg {
 pub struct ServerState {
     /// Concurrent map storing in-memory documents.
     documents: DashMap<Identifier, Document>,
+
+    new_documents: DashMap<Identifier, Arc<collab::Document>>,
     /// Connection to the database pool, if persistence is enabled.
     database: Database,
     /// User sessions for authentication, if enabled.
@@ -87,6 +88,7 @@ impl ServerState {
             } else {
                 None
             },
+            new_documents: DashMap::new(),
             documents: DashMap::new(),
             notify_persister: Notify::new(),
             start_time: SystemTime::now(),
@@ -96,6 +98,7 @@ impl ServerState {
     /// Construct a new server configuration with a temporary database for testing.
     pub async fn temporary() -> anyhow::Result<Self> {
         Ok(Self {
+            new_documents: DashMap::new(),
             database: Database::temporary().await?,
             users: None,
             documents: DashMap::new(),
@@ -149,14 +152,35 @@ pub fn server(state: Arc<ServerState>) -> Router {
             "/api",
             Router::new()
                 .route("/socket/{id}", any(socket_handler))
+                .route("/collab/{id}", get(peer_handler))
                 .route("/text/{id}", get(text_handler))
                 .route("/stats", get(stats_handler))
                 .with_state(state.clone()),
         )
         .nest("/auth", auth::routes(state.users.clone()))
+        .route_service("/new", ServeFile::new("dist/new.html"))
         .route_service("/", ServeFile::new("dist/index.html"))
         .fallback_service(ServeDir::new("dist"))
         .layer(tower_http::trace::TraceLayer::new_for_http())
+}
+
+async fn peer_handler(
+    Path(id): Path<Identifier>,
+    session: Option<Session>,
+    State(state): State<Arc<ServerState>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    let document = match state.new_documents.entry(id.clone()) {
+        Entry::Occupied(e) => e.into_ref(),
+        Entry::Vacant(e) => {
+            let persisted = state.database.load_document(&id).await?;
+            e.insert(Arc::new(collab::Document::new(persisted.text).await))
+        }
+    }
+    .clone();
+
+    let upgrade = ws.on_upgrade(move |socket| collab::peer(socket, document));
+    Ok(upgrade.into_response())
 }
 
 /// Handler for the `/api/socket/{id}` endpoint.

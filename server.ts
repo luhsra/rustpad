@@ -1,5 +1,6 @@
 import { serve } from "bun";
 import index from "./index.html";
+import newApp from "./new.html";
 
 const PROXY_TARGET = "localhost:3030";
 const HTTP_TARGET = "http://" + PROXY_TARGET;
@@ -29,6 +30,7 @@ console.info("worker", editorWorker)
 const server = serve({
     routes: {
         "/": index,
+        "/new": newApp,
         "/api/*": (req) => {
             const url = new URL(req.url);
 
