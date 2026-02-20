@@ -170,10 +170,12 @@ async fn peer_handler(
     State(state): State<Arc<ServerState>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
+    info!("collab connection for id = {id}");
+
     let document = match state.new_documents.entry(id.clone()) {
         Entry::Occupied(e) => e.into_ref(),
         Entry::Vacant(e) => {
-            let persisted = state.database.load_document(&id).await?;
+            let persisted = state.database.load_document(&id).await.unwrap_or_default();
             e.insert(Arc::new(collab::Document::new(persisted.text).await))
         }
     }

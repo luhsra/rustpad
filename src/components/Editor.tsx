@@ -12,16 +12,20 @@ import { nord } from '@milkdown/theme-nord';
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
 import { Doc } from "yjs";
 import { WebsocketProvider } from "y-websocket";
+import useHash from "@/useHash";
 
 // import "@milkdown/crepe/theme/common/style.css";
 // import "@milkdown/crepe/theme/nord.css";
 
 function getWsUri() {
     let protocol = location.protocol == "https:" ? "wss:" : "ws:";
-    return new URL(protocol + "//" + location.host + "/api/collab/");
+    return new URL(protocol + "//" + location.host + "/api/collab");
 }
 
 export const MilkdownEditor: FC = () => {
+    const id = useHash();
+
+
     useEditor((root) => {
 
         const editor = Editor.make()
@@ -32,15 +36,17 @@ export const MilkdownEditor: FC = () => {
             .use(commonmark)
             .use(collab);
 
-        const doc = new Doc();
-        const wsProvider = new WebsocketProvider(
-            getWsUri().href, window.location.hash.substring(1), doc, { connect: true }
-        );
 
         // To fix CJK issue
         editor.remove(syncHeadingIdPlugin);
 
         editor.action((ctx) => {
+            const doc = new Doc();
+            const wsUri = getWsUri();
+            console.info("WebSocket URI:", wsUri.toString());
+            const wsProvider = new WebsocketProvider(
+                getWsUri().toString(), id, doc, { connect: true }
+            );
             const collabService = ctx.get(collabServiceCtx);
 
             collabService
@@ -53,7 +59,7 @@ export const MilkdownEditor: FC = () => {
 
         return editor;
 
-    }, []);
+    }, [id]);
 
     return <Milkdown />;
 };

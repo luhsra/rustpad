@@ -2,16 +2,17 @@
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::select;
-use tokio::sync::broadcast::error::SendError;
-use tokio::sync::broadcast::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
+use tokio::sync::broadcast::error::SendError;
+use tokio::sync::broadcast::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
+use tracing::{error, info};
+use yrs::Update;
 use yrs::encoding::write::Write;
 use yrs::sync::protocol::{MSG_SYNC, MSG_SYNC_UPDATE};
 use yrs::sync::{Awareness, DefaultProtocol, Error, Message, Protocol, SyncMessage};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
-use yrs::Update;
 
 /// A broadcast group can be used to propagate updates produced by yrs [yrs::Doc] and [Awareness]
 /// structures in a binary form that conforms to a y-sync protocol.
@@ -150,7 +151,7 @@ impl BroadcastGroup {
                 while let Ok(msg) = receiver.recv().await {
                     let mut sink = sink.lock().await;
                     if let Err(e) = sink.send(msg).await {
-                        println!("broadcast failed to sent sync message");
+                        error!("broadcast failed to sent sync message");
                         return Err(Error::Other(Box::new(e)));
                     }
                 }
@@ -162,6 +163,7 @@ impl BroadcastGroup {
             tokio::spawn(async move {
                 while let Some(res) = stream.next().await {
                     let msg = Message::decode_v1(&res.map_err(|e| Error::Other(Box::new(e)))?)?;
+                    info!("received message from client: {:?}", msg);
                     let reply = Self::handle_msg(&protocol, &awareness, msg)?;
                     match reply {
                         None => {}
@@ -243,7 +245,7 @@ impl Subscription {
 #[cfg(test)]
 mod test {
     use super::super::broadcast::BroadcastGroup;
-    use futures::{ready, SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt, ready};
     use serde_json::json;
     use std::collections::HashMap;
     use std::pin::Pin;

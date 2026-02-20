@@ -20,6 +20,17 @@ pub struct PersistedDocument {
     /// Text content of the document.
     pub text: String,
 }
+impl Default for PersistedDocument {
+    fn default() -> Self {
+        Self {
+            meta: DocumentMeta {
+                language: "markdown".to_string(),
+                visibility: Visibility::Public,
+            },
+            text: String::new(),
+        }
+    }
+}
 impl PersistedDocument {
     /// Create a new persisted document with the given text and language.
     pub fn new(text: String, language: String, visibility: Visibility) -> Self {
