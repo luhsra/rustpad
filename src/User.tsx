@@ -11,7 +11,24 @@ import { useRef } from "react";
 import { FaPalette } from "react-icons/fa";
 import { VscUnverified, VscVerified, VscVerifiedFilled } from "react-icons/vsc";
 
-import { type OnlineUser } from "./rustpad";
+export type OnlineUser = {
+  name: string;
+  color: string;
+  role: UserRole;
+}
+
+export type UserRole = "admin" | "user" | "anon";
+export type Visibility = "public" | "internal" | "private";
+
+export function canAccess(role: UserRole, visibility: Visibility): boolean {
+  if (visibility === "public") {
+    return true;
+  } else if (visibility === "internal") {
+    return role !== "anon";
+  } else {
+    return role === "admin";
+  }
+}
 
 type UserProps = {
   info: OnlineUser;
@@ -26,7 +43,7 @@ const icons = {
 }
 
 export function User({ info }: UserProps) {
-  const nameColor = `hsl(${info.hue}, 90%, 75%)`;
+  const nameColor = info.color;
   const icon = icons[info.role];
   const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
 
@@ -42,7 +59,7 @@ export function User({ info }: UserProps) {
 
 function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const nameColor = `hsl(${info.hue}, 90%, 75%)`;
+  const nameColor = info.color;
 
   const icon = icons[info.role];
   const name = info.role !== "anon" ? info.name : ("Anon " + info.name);

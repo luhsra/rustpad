@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::WebSocket;
 use futures::StreamExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 mod broadcast;
@@ -13,10 +13,17 @@ mod websocket;
 use websocket::{AxumSink, AxumStream};
 use yrs::{AsyncTransact, Doc, GetString, Text, sync::Awareness};
 
+use crate::Visibility;
 use crate::collab::broadcast::BroadcastGroup;
+use crate::database::PersistedDocument;
 
 pub struct Document {
     bcast: broadcast::BroadcastGroup,
+    state: Arc<RwLock<State>>,
+}
+
+struct State {
+    visibility: Visibility,
 }
 
 impl Document {
@@ -31,16 +38,37 @@ impl Document {
             Arc::new(Awareness::new(doc))
         };
 
-        let bcast = BroadcastGroup::new(awareness.clone(), 32).await;
-        Self { bcast }
+        Self {
+            bcast: BroadcastGroup::new(awareness.clone(), 32).await,
+            state: Arc::new(RwLock::new(State {
+                visibility: Visibility::Public,
+            })),
+        }
     }
 
-    pub async fn snapshot(&self) -> String {
+    pub async fn snapshot(&self) -> PersistedDocument {
         let awareness = self.bcast.awareness();
         let doc = awareness.doc();
         let text = doc.get_or_insert_text("codemirror");
         let txn = doc.transact().await;
-        text.get_string(&txn)
+        let markdown = text.get_string(&txn);
+        let state = self.state.read().await;
+        PersistedDocument::new(markdown, state.visibility)
+    }
+
+    pub async fn dirty_snapshot(&self) -> Option<PersistedDocument> {
+        // TODO: Return only if document has changed since last snapshot
+        Some(self.snapshot().await)
+    }
+
+    pub async fn visibility(&self) -> Visibility {
+        let state = self.state.read().await;
+        state.visibility
+    }
+
+    pub async fn is_idle(&self) -> bool {
+        // self.bcast.is_idle().await
+        false
     }
 }
 

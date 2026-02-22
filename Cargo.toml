@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rustpad-server", "rustpad-wasm"]
+members = ["rustpad-server"]
 
 [profile.release]
 lto = true

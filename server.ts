@@ -1,36 +1,13 @@
 import { serve } from "bun";
 import index from "./index.html";
-import newApp from "./new.html";
 
 const PROXY_TARGET = "localhost:3030";
 const HTTP_TARGET = "http://" + PROXY_TARGET;
 const WS_TARGET = "ws://" + PROXY_TARGET;
 
-const { outputs: [
-    editorWorker,
-    cssWorker,
-    htmlWorker,
-    jsonWorker,
-    tsWorker,
-] } = await Bun.build({
-    entrypoints: [
-        "./src/monaco/editor.worker.ts",
-        "./src/monaco/css.worker.ts",
-        "./src/monaco/html.worker.ts",
-        "./src/monaco/json.worker.ts",
-        "./src/monaco/ts.worker.ts",
-    ],
-    target: "browser",
-});
-function worker(lib: Bun.BuildArtifact): Response {
-    return new Response(lib, { headers: { "Content-Type": "application/javascript" } });
-}
-console.info("worker", editorWorker)
-
 const server = serve({
     routes: {
         "/": index,
-        "/new": newApp,
         "/api/*": (req) => {
             const url = new URL(req.url);
 
@@ -48,11 +25,6 @@ const server = serve({
                 body: req.body,
             });
         },
-        "/src/monaco/editor.worker.js": worker(editorWorker!),
-        "/src/monaco/css.worker.js": worker(cssWorker!),
-        "/src/monaco/html.worker.js": worker(htmlWorker!),
-        "/src/monaco/json.worker.js": worker(jsonWorker!),
-        "/src/monaco/ts.worker.js": worker(tsWorker!),
     },
     websocket: {
         open(ws) {

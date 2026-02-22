@@ -1,59 +1,37 @@
-import { Box, Flex, Portal, Text } from "@chakra-ui/react";
-import { editor, languages } from "monaco-editor";
-import { useEffect, useRef, useState } from "react";
-import useLocalStorageState from "use-local-storage-state";
+import { Box, Flex, Portal } from "@chakra-ui/react";
+import { useEffect, useState } from "react";
 
-// Configure monaco before using it
-import "./monaco-config";
-
-import readme from "../README.md";
 import Footer from "./Footer";
 import Header from "./Header";
+import type { UserRole } from "./User";
 import animals from "./animals.json";
+import {
+  type ConnectionStatus,
+  MilkdownEditorWrapper,
+} from "./components/Editor";
 import { useColorMode } from "./components/color-mode";
-import Rustpad, { type OnlineUser, type UserRole, type Visibility } from "./rustpad";
 import { Toaster, toaster } from "./components/toaster";
-import useHash from "./useHash";
-import { Editor } from "@monaco-editor/react";
-
-export type ConnectionState = "connected" | "disconnected" | "desynchronized";
-
-const sampleText = typeof Bun !== "undefined"
-  ? await Bun.file(readme as any).text()
-  : await fetch(readme as any).then((response) => response.text());
+import { HSLToHex } from "./util";
 
 const VERSION = "dev";
 
-function getWsUri(id: string) {
-  let url = new URL(`api/socket/${id}`, window.location.href);
-  url.protocol = url.protocol == "https:" ? "wss:" : "ws:";
-  return url.href;
+function generateColor() {
+  const hue = Math.floor(Math.random() * 360);
+  const rgb = HSLToHex({ h: hue, s: 100, l: 50 });
+  return rgb;
 }
 
-function generateName() {
-  return animals[Math.floor(Math.random() * animals.length)]!;
-}
-
-function generateHue() {
-  return Math.floor(Math.random() * 360);
-}
-
-function App() {
-  const [language, setLanguage] = useState("markdown");
-  const [connection, setConnection] = useState<ConnectionState>("disconnected");
-  const [users, setUsers] = useState<Record<number, OnlineUser>>({});
-  const [name, setName] = useLocalStorageState("name", {
-    defaultValue: generateName,
-  });
-  const [hue, setHue] = useLocalStorageState("hue", {
-    defaultValue: generateHue,
-  });
-  const [role, setRole] = useState<UserRole>("anon");
-  const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
-  const [visibility, setVisibility] = useState<Visibility>("public");
+function NewApp() {
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
-  const rustpad = useRef<Rustpad | undefined>(undefined);
-  const id = useHash();
+
+  const [color, setColor] = useState(generateColor());
+  const [name, setName] = useState(
+    animals[Math.floor(Math.random() * animals.length)]!,
+  );
+  const [role, setRole] = useState<UserRole>("anon");
+
+  const [connection, setConnection] =
+    useState<ConnectionStatus>("disconnected");
 
   useEffect(() => {
     setColorMode(
@@ -71,132 +49,9 @@ function App() {
     return () => {
       window
         .matchMedia("(prefers-color-scheme: dark)")
-        .removeEventListener("change", () => { });
+        .removeEventListener("change", () => {});
     };
   }, []);
-
-  useEffect(() => {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      model.setValue("");
-      model.setEOL(0); // LF
-      rustpad.current = new Rustpad({
-        uri: getWsUri(id),
-        editor,
-        onConnected: (info) => {
-          console.info("Connected to Rustpad server", info);
-          if (info) {
-            setName(info.name);
-            setRole(info.role);
-            setHue(info.hue);
-          }
-          setConnection("connected");
-        },
-        onDisconnected: () => setConnection("disconnected"),
-        onDesynchronized: () => {
-          setConnection("desynchronized");
-          toaster.create({
-            title: "Desynchronized with server",
-            description: "Please save your work and refresh the page.",
-            type: "error",
-            duration: undefined,
-            closable: true,
-          });
-        },
-        onError: (error) => {
-          setConnection("disconnected");
-          toaster.create({
-            title: "Cannot open document",
-            description: "The name can only contain letters, numbers, hyphens and underscores.",
-            type: "error",
-            duration: undefined,
-            closable: true,
-          });
-        },
-        onChangeMeta: (language, visibility) => {
-          if (languages.getLanguages().some((it) => it.id === language)) {
-            setLanguage(language);
-          }
-          setVisibility(visibility);
-        },
-        onChangeUsers: setUsers,
-        onChangeMe: (info) => {
-          setName(info.name);
-          setRole(info.role);
-          setHue(info.hue);
-        }
-      });
-      return () => {
-        rustpad.current?.dispose();
-        rustpad.current = undefined;
-      };
-    }
-  }, [id, editor, toaster, setUsers]);
-
-  useEffect(() => {
-    if (connection === "connected") {
-      rustpad.current?.setInfo({ name, hue, role });
-    }
-  }, [connection, name, hue, role]);
-
-  function handleLanguageChange(language: string) {
-    setLanguage(language);
-    if (rustpad.current?.setMeta(language)) {
-      toaster.create({
-        title: "Language updated",
-        description: (
-          <>
-            All users are now editing in{" "}
-            <Text as="span" fontWeight="semibold">
-              {language}
-            </Text>
-            .
-          </>
-        ),
-        type: "info",
-        duration: 2000,
-        closable: true,
-      });
-    }
-  }
-
-  function handleVisibilityChange(visibility: Visibility) {
-    setVisibility(visibility);
-    if (rustpad.current?.setMeta(undefined, visibility)) {
-      toaster.create({
-        title: "Visibility updated",
-        description: (
-          <>
-            The document is now{" "}
-            <Text as="span" fontWeight="semibold">
-              {visibility}
-            </Text>
-            .
-          </>
-        ),
-        type: "info",
-        duration: 2000,
-        closable: true,
-      });
-    }
-  }
-
-  function handleLoadSample() {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      const range = model.getFullModelRange();
-
-      model.pushEditOperations(
-        editor.getSelections(),
-        [{ range, text: sampleText }],
-        () => null,
-      );
-      editor.setPosition({ column: 0, lineNumber: 0 });
-      if (language !== "markdown") {
-        handleLanguageChange("markdown");
-      }
-    }
-  }
 
   return (
     <Flex direction="column" h="100vh" overflow="hidden">
@@ -206,27 +61,28 @@ function App() {
         connection={connection}
       />
       <Box flex="1 0" minH={0}>
-        <Editor
-          theme={colorMode === "dark" ? "vs-dark" : "vs"}
-          language={language}
-          options={{
-            automaticLayout: true,
-            fontSize: 13,
-            minimap: { enabled: false },
-          }}
-          onMount={(editor) => setEditor(editor)}
+        <MilkdownEditorWrapper
+          dark={colorMode === "dark"}
+          name={name}
+          color={color}
+          onConnectionChange={setConnection}
+          onConnectionError={(error) =>
+            toaster.error({
+              title: "Connection error",
+              description: "" + error,
+              closable: true,
+            })
+          }
         />
       </Box>
       <Footer
-        language={language}
-        visibility={visibility}
-        currentUser={{ name, hue, role }}
-        users={users}
-        onSetVisibility={handleVisibilityChange}
-        onLanguageChange={handleLanguageChange}
-        onLoadSample={handleLoadSample}
+        visibility={"public"}
+        currentUser={{ name, color, role }}
+        users={[]}
+        onSetVisibility={() => {}}
+        onLoadSample={() => {}}
         onChangeName={(name) => name.length > 0 && setName(name)}
-        onChangeColor={() => setHue(generateHue())}
+        onChangeColor={() => setColor(generateColor())}
       />
       <Portal>
         <Toaster />
@@ -235,4 +91,4 @@ function App() {
   );
 }
 
-export default App;
+export default NewApp;

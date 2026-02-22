@@ -13,28 +13,24 @@ import {
 import { languages } from "monaco-editor";
 import { VscOrganization } from "react-icons/vsc";
 
-import UserMe, { User } from "./User";
-import { canAccess, type OnlineUser, type Visibility } from "./rustpad";
+import UserMe, { User, type Visibility, canAccess } from "./User";
+import { type OnlineUser } from "./User";
 
 export type FooterProps = {
-  language: string;
   currentUser: OnlineUser;
   users: Record<number, OnlineUser>;
   visibility: Visibility;
   onSetVisibility: (visibility: Visibility) => void;
-  onLanguageChange: (language: string) => void;
   onLoadSample: () => void;
   onChangeName: (name: string) => void;
   onChangeColor: () => void;
 };
 
 function Footer({
-  language,
   currentUser,
   users,
   visibility,
   onSetVisibility,
-  onLanguageChange,
   onLoadSample,
   onChangeName,
   onChangeColor,
@@ -48,26 +44,12 @@ function Footer({
 
   const visibilityOptions: Visibility[] = ["public", "internal", "private"];
 
-  const currentVisibilityOptions = visibilityOptions.filter((option) => option !== visibility && canAccess(currentUser.role, option));
+  const currentVisibilityOptions = visibilityOptions.filter(
+    (option) => option !== visibility && canAccess(currentUser.role, option),
+  );
 
   return (
     <Flex bgColor="#0071c3" color="white" gap={2}>
-      <Box>
-        <NativeSelect.Root size="xs">
-          <NativeSelect.Field
-            value={language}
-            onChange={(event) => onLanguageChange(event.target.value)}
-          >
-            {lang.map((lang) => (
-              <option key={lang} value={lang} style={{ color: "black" }}>
-                {lang}
-              </option>
-            ))}
-          </NativeSelect.Field>
-          <NativeSelect.Indicator />
-        </NativeSelect.Root>
-      </Box>
-
       <Dialog.Root>
         <Dialog.Trigger asChild>
           <Button variant="outline" size="xs">
@@ -88,17 +70,15 @@ function Footer({
                 {currentVisibilityOptions.length > 0 && (
                   <Text>Change document visibility</Text>
                 )}
-                {
-                  currentVisibilityOptions.map((option) => (
-                    <Button
-                      key={option}
-                      mt={2}
-                      onClick={() => onSetVisibility(option)}
-                    >
-                      {option}
-                    </Button>
-                  ))
-                }
+                {currentVisibilityOptions.map((option) => (
+                  <Button
+                    key={option}
+                    mt={2}
+                    onClick={() => onSetVisibility(option)}
+                  >
+                    {option}
+                  </Button>
+                ))}
 
                 <Text>Delete this document and load the example code?</Text>
                 <Button mt={4} onClick={onLoadSample}>

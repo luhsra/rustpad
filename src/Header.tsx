@@ -1,13 +1,13 @@
 import { Box, Flex, HStack, Icon, IconButton, Text } from "@chakra-ui/react";
 import { VscAdd, VscColorMode } from "react-icons/vsc";
 
-import { type ConnectionState } from "./App";
 import ConnectionStatus from "./ConnectionStatus";
+import type { ConnectionStatus as Status } from "./components/Editor";
 
 export type HeaderProps = {
   toggleColorMode: () => void;
   version: string;
-  connection: ConnectionState;
+  connection: Status;
 };
 
 function Header({ toggleColorMode, version, connection }: HeaderProps) {

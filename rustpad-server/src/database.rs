@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::warn;
 
-use crate::Identifier;
-use crate::rustpad::{DocumentMeta, Visibility};
+use crate::{Identifier, Visibility};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DocumentMeta {
+    pub visibility: Visibility,
+}
 
 /// Represents a document persisted in database storage.
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct PersistedDocument {
     /// Metadata of the document.
     pub meta: DocumentMeta,
@@ -24,7 +28,6 @@ impl Default for PersistedDocument {
     fn default() -> Self {
         Self {
             meta: DocumentMeta {
-                language: "markdown".to_string(),
                 visibility: Visibility::Public,
             },
             text: String::new(),
@@ -33,12 +36,9 @@ impl Default for PersistedDocument {
 }
 impl PersistedDocument {
     /// Create a new persisted document with the given text and language.
-    pub fn new(text: String, language: String, visibility: Visibility) -> Self {
+    pub fn new(text: String, visibility: Visibility) -> Self {
         Self {
-            meta: DocumentMeta {
-                language,
-                visibility,
-            },
+            meta: DocumentMeta { visibility },
             text,
         }
     }
