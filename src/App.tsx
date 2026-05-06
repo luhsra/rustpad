@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 import Footer from "./Footer";
 import Header from "./Header";
-import type { UserRole } from "./User";
+import type { OnlineUser, UserRole } from "./User";
 import animals from "./animals.json";
 import {
   type ConnectionStatus,
@@ -12,22 +12,26 @@ import {
 import { useColorMode } from "./components/color-mode";
 import { Toaster, toaster } from "./components/toaster";
 import { HSLToHex } from "./util";
+import useLocalStorageState from "use-local-storage-state";
+
 
 const VERSION = "dev";
 
-function generateColor() {
+function generateColor(): string {
   const hue = Math.floor(Math.random() * 360);
   const rgb = HSLToHex({ h: hue, s: 100, l: 50 });
   return rgb;
 }
+function generateName(): string {
+  return animals[Math.floor(Math.random() * animals.length)]!;
+}
 
-function NewApp() {
+function App() {
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
 
-  const [color, setColor] = useState(generateColor());
-  const [name, setName] = useState(
-    animals[Math.floor(Math.random() * animals.length)]!,
-  );
+  const [users, setUsers] = useState<Record<number, OnlineUser>>({});
+  const [color, setColor] = useLocalStorageState("color", { defaultValue: generateColor() });
+  const [name, setName] = useLocalStorageState("name", { defaultValue: generateName() });
   const [role, setRole] = useState<UserRole>("anon");
 
   const [connection, setConnection] =
@@ -49,7 +53,7 @@ function NewApp() {
     return () => {
       window
         .matchMedia("(prefers-color-scheme: dark)")
-        .removeEventListener("change", () => {});
+        .removeEventListener("change", () => { });
     };
   }, []);
 
@@ -65,6 +69,7 @@ function NewApp() {
           dark={colorMode === "dark"}
           name={name}
           color={color}
+          role={role}
           onConnectionChange={setConnection}
           onConnectionError={(error) =>
             toaster.error({
@@ -73,14 +78,15 @@ function NewApp() {
               closable: true,
             })
           }
+          onUserChange={setUsers}
         />
       </Box>
       <Footer
         visibility={"public"}
         currentUser={{ name, color, role }}
-        users={[]}
-        onSetVisibility={() => {}}
-        onLoadSample={() => {}}
+        users={users}
+        onSetVisibility={() => { }}
+        onLoadSample={() => { }}
         onChangeName={(name) => name.length > 0 && setName(name)}
         onChangeColor={() => setColor(generateColor())}
       />
@@ -91,4 +97,4 @@ function NewApp() {
   );
 }
 
-export default NewApp;
+export default App;

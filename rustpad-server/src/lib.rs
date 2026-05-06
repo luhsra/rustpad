@@ -14,7 +14,7 @@ use rand::random_range;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, broadcast};
 use tokio::time;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 mod auth;
 pub mod database;
@@ -163,6 +163,7 @@ async fn peer_handler(
                 info!("denying access to limited document {id}");
                 return Ok(StatusCode::FORBIDDEN.into_response());
             }
+            state.notify_persister.notify_waiters();
             e.insert(Arc::new(collab::Document::new(persisted.text).await))
         }
     }
@@ -250,9 +251,12 @@ const PERSIST_INTERVAL_JITTER: Duration = Duration::from_secs(6);
 /// Persists changed documents after a fixed time interval.
 async fn persister(state: Arc<ServerState>) {
     loop {
+        warn!("persisting documents...");
+
         let mut to_persist = Vec::new();
         for entry in &state.documents {
             let (id, value) = entry.pair();
+            info!("doc {id} idle: {}", value.is_idle().await);
             to_persist.push((id.clone(), value.dirty_snapshot().await));
         }
 

@@ -11,6 +11,7 @@ mod signaling;
 mod websocket;
 
 use websocket::{AxumSink, AxumStream};
+use yrs::{XmlFragment, XmlTextPrelim};
 use yrs::{AsyncTransact, Doc, GetString, Text, sync::Awareness};
 
 use crate::Visibility;
@@ -31,10 +32,12 @@ impl Document {
         let awareness = {
             let doc = Doc::new();
             {
-                let txt = doc.get_or_insert_text("srapad");
+                let txt = doc.get_or_insert_xml_fragment("prosemirror");
                 let mut txn = doc.transact_mut().await;
-                txt.push(&mut txn, &content);
+                // TODO: Fix parsing and loading of document content
+                txt.push_back(&mut txn, XmlTextPrelim::new(content));
             }
+
             Arc::new(Awareness::new(doc))
         };
 
@@ -49,14 +52,16 @@ impl Document {
     pub async fn snapshot(&self) -> PersistedDocument {
         let awareness = self.bcast.awareness();
         let doc = awareness.doc();
-        let text = doc.get_or_insert_text("codemirror");
+        let text = doc.get_or_insert_xml_fragment("prosemirror");
         let txn = doc.transact().await;
         let markdown = text.get_string(&txn);
         let state = self.state.read().await;
+        info!("snapshotting document: {:?}", markdown);
         PersistedDocument::new(markdown, state.visibility)
     }
 
     pub async fn dirty_snapshot(&self) -> Option<PersistedDocument> {
+
         // TODO: Return only if document has changed since last snapshot
         Some(self.snapshot().await)
     }
@@ -67,8 +72,12 @@ impl Document {
     }
 
     pub async fn is_idle(&self) -> bool {
+        info!("checking if document is idle");
+        info!("awareness has {} clients", self.bcast.awareness().iter().count());
+
+        self.bcast.awareness().iter().next().is_none()
         // self.bcast.is_idle().await
-        false
+        // false
     }
 }
 
@@ -81,4 +90,5 @@ pub async fn peer(ws: WebSocket, document: Arc<Document>) {
         Ok(_) => info!("broadcasting for channel finished successfully"),
         Err(e) => warn!("broadcasting for channel finished abruptly: {}", e),
     }
+    // TODO: remove awareness state for peer
 }

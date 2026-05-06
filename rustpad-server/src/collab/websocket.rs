@@ -183,8 +183,12 @@ mod test {
         let sub = bcast.subscribe(sink, stream);
         match sub.completed().await {
             Ok(_) => println!("broadcasting for channel finished successfully"),
-            Err(e) => eprintln!("broadcasting for channel finished abruptly: {}", e),
+            Err(e) => {
+                eprintln!("broadcasting for channel finished abruptly: {}", e);
+                // TODO: remove awareness state for peer
+            },
         }
+        // TODO: Timeout for awareness state cleanup
     }
 
     struct TungsteniteSink(SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>);

@@ -5,11 +5,12 @@ import { editorViewOptionsCtx, rootDOMCtx } from "@milkdown/kit/core";
 import { collab, collabServiceCtx } from "@milkdown/plugin-collab";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 import { type FC, useEffect, useState } from "react";
-import type { Awareness } from "y-protocols/awareness.js";
+import { Awareness } from "y-protocols/awareness.js";
 import { WebsocketProvider } from "y-websocket";
 import { Doc } from "yjs";
 
 import "./Editor.css";
+import type { OnlineUser, UserRole } from "@/User";
 
 function getWsUri() {
   let protocol = location.protocol == "https:" ? "wss:" : "ws:";
@@ -22,16 +23,20 @@ export interface MilkdownEditorProps {
   dark?: boolean;
   name: string;
   color: string;
+  role: UserRole;
   onConnectionChange?: (status: ConnectionStatus) => void;
   onConnectionError?: (error: Event) => void;
+  onUserChange?: (users: Record<number, OnlineUser>) => void;
 }
 
 export const MilkdownEditor: FC<MilkdownEditorProps> = ({
   dark,
   name,
   color,
+  role,
   onConnectionChange,
   onConnectionError,
+  onUserChange,
 }) => {
   const id = useHash();
 
@@ -57,11 +62,33 @@ export const MilkdownEditor: FC<MilkdownEditorProps> = ({
         const wsUri = getWsUri();
         console.info("Connect:", wsUri.toString());
         const doc = new Doc();
+
+        awareness = new Awareness(doc);
+        awareness.setLocalStateField("user", { name, color, role });
+        awareness.on("change", (change: any) => {
+          console.info("Awareness change:", change, wsProvider.awareness.getStates());
+          console.info("List:", Array.from(wsProvider.awareness.getStates().values()));
+
+          const users: Record<number, OnlineUser> = {};
+          for (const [id, state] of wsProvider.awareness.getStates().entries()) {
+            const user: OnlineUser | undefined = state.user;
+            if (user) {
+              users[id] = {
+                name: user.name,
+                color: user.color,
+                role: user.role ?? "anon",
+              };
+            }
+          }
+          console.info("Users:", users);
+          onUserChange?.(users);
+        });
+
         const wsProvider = new WebsocketProvider(
           getWsUri().toString(),
           id,
           doc,
-          { connect: true },
+          { connect: true, awareness },
         );
         wsProvider.on("connection-error", (event) => {
           console.error("WebSocket connection error:", event);
@@ -75,12 +102,10 @@ export const MilkdownEditor: FC<MilkdownEditorProps> = ({
             event.status === "connected" ? "connected" : "disconnected",
           );
         });
-
-        awareness = wsProvider.awareness;
-        awareness.setLocalStateField("user", { name, color });
-        awareness.on("change", () => {
-          console.info("Awareness change:", wsProvider.awareness.getStates());
+        window.addEventListener("beforeunload", () => {
+          wsProvider.destroy();
         });
+
         ctx
           .get(collabServiceCtx)
           .bindDoc(doc)
@@ -93,10 +118,10 @@ export const MilkdownEditor: FC<MilkdownEditorProps> = ({
   useEffect(() => {
     if (!loading) {
       get()?.action((ctx) => {
-        awareness?.setLocalStateField("user", { name, color });
+        awareness?.setLocalStateField("user", { name, color, role });
       });
     }
-  }, [name, color]);
+  }, [name, color, role]);
 
   useEffect(() => {
     if (!loading) {
