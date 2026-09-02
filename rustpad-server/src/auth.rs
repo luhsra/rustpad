@@ -67,6 +67,7 @@ enum AuthState {
 #[derive(Debug)]
 pub struct UserSessions {
     sessions: DashMap<Session, AuthState>,
+    #[allow(clippy::type_complexity)]
     client: Client<
         GitLabTokenClaims,
         CoreAuthDisplay,

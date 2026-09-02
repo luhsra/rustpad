@@ -5,14 +5,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use axum::extract::ws::Message;
-use operational_transform::OperationSeq;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::futures::Notified;
 use tokio::sync::{Notify, RwLock, broadcast};
 use tracing::info;
 
 use crate::auth::User;
-use crate::{database::PersistedDocument, ot::transform_index};
+use crate::{
+    database::PersistedDocument,
+    delta::{DEFAULT_QUILL_EMBEDS, Delta},
+};
+
+const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 
 /// The main object representing a collaborative session.
 pub struct Rustpad {
@@ -68,7 +73,7 @@ impl From<User> for OnlineUser {
 struct State {
     // TODO: track revisions per user and merge older operations
     operations: Vec<UserOperation>,
-    text: String,
+    document: Delta,
     meta: DocumentMeta,
     users: HashMap<u64, OnlineUser>,
     cursors: HashMap<u64, CursorData>,
@@ -78,9 +83,14 @@ impl Default for State {
     fn default() -> Self {
         Self {
             operations: Vec::new(),
-            text: String::new(),
+            document: {
+                let mut document = Delta::new();
+                document
+                    .insert("\n", None)
+                    .expect("default document is valid");
+                document
+            },
             meta: DocumentMeta {
-                language: "markdown".to_string(),
                 visibility: Visibility::Public,
             },
             users: HashMap::new(),
@@ -105,18 +115,20 @@ impl Default for Rustpad {
 
 impl Rustpad {
     pub async fn load(document: PersistedDocument) -> Self {
-        let mut operation = OperationSeq::default();
-        operation.insert(&document.text);
+        let mut operation = document.delta.clone();
+        operation
+            .delete(1)
+            .expect("persisted documents are validated when loaded");
 
         let rustpad = Self::default();
         {
             let mut state = rustpad.state.write().await;
-            state.text = document.text;
+            state.document = document.delta;
             state.meta = document.meta;
             state.operations.push(UserOperation {
                 id: u64::MAX,
                 operation,
-            })
+            });
         }
         rustpad
     }
@@ -182,7 +194,7 @@ impl Rustpad {
     pub async fn snapshot(&self) -> PersistedDocument {
         let state = self.state.read().await;
         PersistedDocument {
-            text: state.text.clone(),
+            delta: state.document.clone(),
             meta: state.meta.clone(),
         }
     }
@@ -202,7 +214,7 @@ impl Rustpad {
         if state.dirty {
             state.dirty = false;
             Some(PersistedDocument {
-                text: state.text.clone(),
+                delta: state.document.clone(),
                 meta: state.meta.clone(),
             })
         } else {
@@ -273,14 +285,8 @@ impl Rustpad {
                     .context("invalid edit operation")?;
                 self.notify.notify_waiters();
             }
-            ClientMsg::SetMeta {
-                language,
-                visibility,
-            } => {
+            ClientMsg::SetMeta { visibility } => {
                 let mut state = self.state.write().await;
-                if let Some(language) = language.clone() {
-                    state.meta.language = language;
-                }
                 if let Some(visibility) = visibility {
                     let old_visibility = state.meta.visibility;
                     state.meta.visibility = visibility;
@@ -318,38 +324,45 @@ impl Rustpad {
         Ok(())
     }
 
-    async fn apply_edit(
-        &self,
-        id: u64,
-        revision: usize,
-        mut operation: OperationSeq,
-    ) -> Result<()> {
+    async fn apply_edit(&self, id: u64, revision: usize, mut operation: Delta) -> Result<()> {
+        operation.validate_quill(DEFAULT_QUILL_EMBEDS)?;
+        if serde_json::to_vec(&operation)?.len() > MAX_DOCUMENT_BYTES {
+            bail!("edit operation is greater than 256 KiB maximum");
+        }
+
         let mut state = self.state.write().await;
         let len = state.operations.len();
         if revision > len {
             bail!("got revision {}, but current is {}", revision, len);
         }
         for history_op in &state.operations[revision..] {
-            operation = operation.transform(&history_op.operation)?.0;
+            operation = history_op.operation.transform(&operation, true)?;
         }
-        if operation.target_len() > 256 * 1024 {
+        operation.validate_quill(DEFAULT_QUILL_EMBEDS)?;
+        let new_document = operation.apply_to_document(&state.document)?;
+        if !new_document.ends_with_newline() {
+            bail!("Quill documents must end with a newline");
+        }
+        let document_length = new_document.length()?;
+        if document_length > MAX_DOCUMENT_BYTES
+            || serde_json::to_vec(&new_document)?.len() > MAX_DOCUMENT_BYTES
+        {
             bail!(
-                "target length {} is greater than 256 KiB maximum",
-                operation.target_len()
+                "document length {} is greater than 256 KiB maximum",
+                document_length
             );
         }
-        let new_text = operation.apply(&state.text)?;
-        for (_, data) in state.cursors.iter_mut() {
-            for cursor in data.cursors.iter_mut() {
-                *cursor = transform_index(&operation, *cursor);
+        for data in state.cursors.values_mut() {
+            for cursor in &mut data.cursors {
+                *cursor = u32::try_from(operation.transform_position(*cursor as usize, false)?)?;
             }
-            for (start, end) in data.selections.iter_mut() {
-                *start = transform_index(&operation, *start);
-                *end = transform_index(&operation, *end);
+            for (start, end) in &mut data.selections {
+                *start = u32::try_from(operation.transform_position(*start as usize, false)?)?;
+                *end = u32::try_from(operation.transform_position(*end as usize, false)?)?;
             }
         }
         state.operations.push(UserOperation { id, operation });
-        state.text = new_text;
+        state.document = new_document;
         state.dirty = true;
         Ok(())
     }
@@ -358,8 +371,6 @@ impl Rustpad {
 /// Metadata for a persisted document.
 #[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentMeta {
-    /// Language of the document for editor syntax highlighting.
-    pub language: String,
     /// If accessible by external users.
     pub visibility: Visibility,
 }
@@ -378,7 +389,7 @@ pub enum Visibility {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserOperation {
     pub id: u64,
-    pub operation: OperationSeq,
+    pub operation: Delta,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -391,15 +402,9 @@ pub struct CursorData {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMsg {
     /// Represents a sequence of local edits from the user.
-    Edit {
-        revision: usize,
-        operation: OperationSeq,
-    },
+    Edit { revision: usize, operation: Delta },
     /// Sets the metadata of the editor.
-    SetMeta {
-        language: Option<String>,
-        visibility: Option<Visibility>,
-    },
+    SetMeta { visibility: Option<Visibility> },
     /// Sets the user's current information.
     ClientInfo { name: String, hue: u16 },
     /// Sets the user's cursor and selection positions.

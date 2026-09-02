@@ -22,8 +22,8 @@ use tracing::{debug, error, info};
 
 mod auth;
 pub mod database;
+pub mod delta;
 use database::Database;
-mod ot;
 pub mod rustpad;
 use rustpad::Rustpad;
 mod util;
@@ -191,15 +191,16 @@ async fn socket_handler(
             document
         }
         Entry::Vacant(e) => {
-            let rustpad = if let Ok(document) = state.database.load_document(&id).await {
-                if !role.can_access(document.meta.visibility) {
-                    info!("denying access to limited document {id}");
-                    return Ok(StatusCode::FORBIDDEN.into_response());
+            let rustpad = match state.database.load_document(&id).await {
+                Ok(document) => {
+                    if !role.can_access(document.meta.visibility) {
+                        info!("denying access to limited document {id}");
+                        return Ok(StatusCode::FORBIDDEN.into_response());
+                    }
+                    Arc::new(Rustpad::load(document).await)
                 }
-
-                Arc::new(Rustpad::load(document).await)
-            } else {
-                Arc::new(Rustpad::default())
+                Err(error) if state.database.document_exists(&id) => return Err(error.into()),
+                Err(_) => Arc::new(Rustpad::default()),
             };
             let inserted = e.insert(Document::new(rustpad));
             // Wakeup if the persister is sleeping
@@ -214,9 +215,12 @@ async fn socket_handler(
         value.rustpad.clone()
     };
     let state = state.clone();
-    let id = id.clone();
-    let upgrade =
-        ws.on_upgrade(move |socket| websocket_connection(id, rustpad, socket, state, session));
+    let upgrade = ws.on_upgrade(async move |socket| {
+        let result = websocket_connection(id.clone(), rustpad, socket, state, session).await;
+        if let Err(e) = result {
+            error!("Error in websocket connection for document {id}: {e:?}");
+        }
+    });
     Ok(upgrade.into_response())
 }
 
@@ -226,7 +230,7 @@ async fn websocket_connection(
     mut socket: axum::extract::ws::WebSocket,
     state: Arc<ServerState>,
     session: Option<Session>,
-) {
+) -> anyhow::Result<()> {
     let mut user = if let Some(session) = &session {
         state.get_user(session).await
     } else {
@@ -238,95 +242,82 @@ async fn websocket_connection(
         .unwrap_or(Role::Anon);
 
     let (user_id, mut revision, messages) = rustpad.init_connection(user.clone()).await;
-    // TODO: use try block if stable
-    let result = async |
-        doc_id,
-        rustpad: Arc<Rustpad>,
-        socket: &mut axum::extract::ws::WebSocket,
-        state: Arc<ServerState>,
-        session
-    | -> anyhow::Result<()> {
-        for message in messages {
+    for message in messages {
+        debug!("socket {doc_id} - {user_id} -> {message:?}");
+        socket.send(message.into()).await?;
+    }
+
+    let mut global_update_rx = state.update.subscribe();
+    let mut doc_update_rx = rustpad.subscribe();
+
+    loop {
+        // In order to avoid the "lost wakeup" problem, we first request a
+        // notification, **then** check the current state for new revisions.
+        // This is the same approach that `tokio::sync::watch` takes.
+        let notified = rustpad.notified();
+
+        if rustpad.killed() {
+            break;
+        }
+        if !role.can_access(rustpad.visibility().await) {
+            info!("{doc_id} disconnecting users without permission");
+            break;
+        }
+        if rustpad.revision().await > revision {
+            let (new_revision, message) = rustpad.send_history(revision).await?;
+            revision = new_revision;
             debug!("socket {doc_id} - {user_id} -> {message:?}");
             socket.send(message.into()).await?;
         }
 
-        let mut global_update_rx = state.update.subscribe();
-        let mut doc_update_rx = rustpad.subscribe();
-
-        loop {
-            // In order to avoid the "lost wakeup" problem, we first request a
-            // notification, **then** check the current state for new revisions.
-            // This is the same approach that `tokio::sync::watch` takes.
-            let notified = rustpad.notified();
-
-            if rustpad.killed() {
-                break;
+        tokio::select! {
+            _ = notified => {}
+            update = global_update_rx.recv() => {
+                match update? {
+                    GlobalMsg::UserUpdate(updated_user) => {
+                        if let Some(user) = &mut user && user.name == updated_user.name {
+                            info!("updating user {} info for document {doc_id}", user.name);
+                            *user = updated_user;
+                            rustpad.update_user(user.clone().into()).await;
+                        }
+                    }
+                }
             }
-            if !role.can_access(rustpad.visibility().await) {
-                info!("{doc_id} disconnecting users without permission");
-                break;
-            }
-            if rustpad.revision().await > revision {
-                let (new_revision, message) = rustpad.send_history(revision).await?;
-                revision = new_revision;
+            update = doc_update_rx.recv() => {
+                let message = update?;
                 debug!("socket {doc_id} - {user_id} -> {message:?}");
                 socket.send(message.into()).await?;
             }
-
-            tokio::select! {
-                _ = notified => {}
-                update = global_update_rx.recv() => {
-                    match update? {
-                        GlobalMsg::UserUpdate(updated_user) => {
-                            if let Some(user) = &mut user && user.name == updated_user.name {
-                                info!("updating user {} info for document {doc_id}", user.name);
-                                *user = updated_user;
-                                rustpad.update_user(user.clone().into()).await;
-                            }
+            result = socket.recv() => match result {
+                None => break,
+                Some(Ok(Message::Text(message))) => {
+                    let message = serde_json::from_str(&message).context("Failed to parse JSON message")?;
+                    debug!("socket {doc_id} - {user_id} <- {message:?}");
+                    if let Some(user) = &mut user && let ClientMsg::ClientInfo { hue, .. } = &message {
+                        user.hue = *hue;
+                        if let Some(session) = &session && let Some(users) = &state.users {
+                            // Update user info in session store as well
+                            users.update_user(session, user.clone()).await;
+                            state.update.send(GlobalMsg::UserUpdate(user.clone())).ok();
                         }
                     }
+                    rustpad.handle_message(user_id, message, &user).await?;
                 }
-                update = doc_update_rx.recv() => {
-                    let message = update?;
-                    debug!("socket {doc_id} - {user_id} -> {message:?}");
-                    socket.send(message.into()).await?;
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(m)) => {
+                    debug!("socket {doc_id} - {user_id} received unsupported message: {m:?}");
                 }
-                result = socket.recv() => match result {
-                    None => break,
-                    Some(Ok(Message::Text(message))) => {
-                        let message = serde_json::from_str(&message).context("Failed to parse JSON message")?;
-                        debug!("socket {doc_id} - {user_id} <- {message:?}");
-                        if let Some(user) = &mut user && let ClientMsg::ClientInfo { hue, .. } = &message {
-                            user.hue = *hue;
-                            if let Some(session) = &session && let Some(users) = &state.users {
-                                // Update user info in session store as well
-                                users.update_user(session, user.clone()).await;
-                                state.update.send(GlobalMsg::UserUpdate(user.clone())).ok();
-                            }
-                        }
-                        rustpad.handle_message(user_id, message, &user).await?;
-                    }
-                    Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(m)) => {
-                        debug!("socket {doc_id} - {user_id} received unsupported message: {m:?}");
-                    }
-                    Some(Err(e)) => {
-                        error!("Error receiving websocket message for document {doc_id}: {e:?}");
-                        break;
-                    }
+                Some(Err(e)) => {
+                    error!("Error receiving websocket message for document {doc_id}: {e:?}");
+                    break;
                 }
             }
         }
-        Ok(())
-    }(doc_id.clone(), rustpad.clone(), &mut socket, state, session).await;
+    }
 
     rustpad.close_connection(user_id).await;
     socket.close().await.ok();
-
-    if let Err(e) = result {
-        error!("Error in websocket connection for document {doc_id}: {e:?}");
-    }
+    Ok(())
 }
 
 /// Handler for the `/api/text/{id}` endpoint.
@@ -355,8 +346,7 @@ async fn text_handler(
             }
         }
         return Ok(Response::builder()
-            .header("Language", document.meta.language.clone())
-            .body(document.text)?
+            .body(document.delta.to_plain_text()?)?
             .into_response());
     }
     Ok(().into_response())

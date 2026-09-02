@@ -5,23 +5,13 @@ COPY . .
 RUN cargo test --release
 RUN cargo build --release
 
-FROM --platform=amd64 rust:alpine AS wasm
-WORKDIR /home/rust/src
-RUN apk --no-cache add curl musl-dev
-RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-COPY . .
-RUN wasm-pack build rustpad-wasm
-
-FROM --platform=amd64 node:lts-alpine AS frontend
+FROM oven/bun:1-alpine AS frontend
 WORKDIR /usr/src/app
-COPY package.json package-lock.json ./
-COPY --from=wasm /home/rust/src/rustpad-wasm/pkg rustpad-wasm/pkg
-RUN npm ci
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
 COPY . .
-ARG GITHUB_SHA
-ENV VITE_SHA=${GITHUB_SHA}
-RUN npm run check
-RUN npm run build
+RUN bun run check
+RUN bun run build
 
 FROM scratch
 COPY --from=frontend /usr/src/app/dist dist

@@ -42,7 +42,7 @@
               cargo-watch
               lldb
               openssl
-              wasm-pack
+
               bun
             ];
           env = {

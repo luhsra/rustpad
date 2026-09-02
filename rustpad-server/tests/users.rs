@@ -192,7 +192,7 @@ async fn test_cursors() -> Result<()> {
     let msg = json!({
         "Edit": {
             "revision": 0,
-            "operation": ["a"]
+            "operation": { "ops": [{ "insert": "a" }] }
         }
     });
     socket2.send(&msg).await;

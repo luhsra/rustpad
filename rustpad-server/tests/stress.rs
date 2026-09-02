@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Result, anyhow};
 use common::*;
 use tracing::info;
-use operational_transform::OperationSeq;
+
 use rustpad_server::{ServerState, server};
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -33,9 +33,11 @@ async fn test_lost_wakeups() -> Result<()> {
     for i in 0..100 {
         let num_edits = i % 5 + 1;
         for _ in 0..num_edits {
-            let mut operation = OperationSeq::default();
-            operation.retain(revision);
-            operation.insert("a");
+            let operation = if revision == 0 {
+                json!({ "ops": [{ "insert": "a" }] })
+            } else {
+                json!({ "ops": [{ "retain": revision }, { "insert": "a" }] })
+            };
             let msg = json!({
                 "Edit": {
                     "revision": revision,
@@ -69,7 +71,7 @@ async fn test_lost_wakeups() -> Result<()> {
     }
 
     client
-        .expect_text("stress", &"a".repeat(revision as usize))
+        .expect_text("stress", &("a".repeat(revision as usize) + "\n"))
         .await;
 
     Ok(())
@@ -87,23 +89,19 @@ async fn test_large_document() -> Result<()> {
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(socket.recv().await?.get("Meta").is_some());
 
-    let mut operation = OperationSeq::default();
-    operation.insert(&"a".repeat(5000));
     let msg = json!({
         "Edit": {
             "revision": 0,
-            "operation": operation
+            "operation": { "ops": [{ "insert": "a".repeat(5000) }] }
         }
     });
     socket.send(&msg).await;
     socket.recv().await?;
 
-    let mut operation = OperationSeq::default();
-    operation.insert(&"a".repeat(500000));
     let msg = json!({
         "Edit": {
             "revision": 0,
-            "operation": operation
+            "operation": { "ops": [{ "insert": "a".repeat(500000) }] }
         }
     });
     socket.send(&msg).await;

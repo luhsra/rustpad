@@ -10,25 +10,23 @@ use tokio::fs;
 use tracing::warn;
 
 use crate::Identifier;
+use crate::delta::{DEFAULT_QUILL_EMBEDS, Delta};
 use crate::rustpad::{DocumentMeta, Visibility};
 
 /// Represents a document persisted in database storage.
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize)]
 pub struct PersistedDocument {
     /// Metadata of the document.
     pub meta: DocumentMeta,
-    /// Text content of the document.
-    pub text: String,
+    /// Quill Delta content of the document.
+    pub delta: Delta,
 }
 impl PersistedDocument {
-    /// Create a new persisted document with the given text and language.
-    pub fn new(text: String, language: String, visibility: Visibility) -> Self {
+    /// Create a new persisted document with the given Delta and visibility.
+    pub fn new(delta: Delta, visibility: Visibility) -> Self {
         Self {
-            meta: DocumentMeta {
-                language,
-                visibility,
-            },
-            text,
+            meta: DocumentMeta { visibility },
+            delta,
         }
     }
 }
@@ -104,33 +102,38 @@ impl Database {
         Self::new(storage).await
     }
 
-    /// Load the text of a document from the database.
-    pub async fn load_document(&self, document_id: &Identifier) -> Result<PersistedDocument> {
-        let meta_path = self.document_meta_path_for(document_id);
-        if meta_path.exists() {
-            let meta_data = fs::read_to_string(meta_path).await?;
+    /// Return whether storage contains files for this document.
+    pub fn document_exists(&self, document_id: &Identifier) -> bool {
+        self.document_path_for(document_id).exists()
+    }
 
-            let text = fs::read_to_string(self.document_path_for(document_id)).await?;
-            let meta: DocumentMeta = serde_json::from_str(&meta_data)?;
-            Ok(PersistedDocument { text, meta })
+    /// Load a Delta document from storage.
+    pub async fn load_document(&self, document_id: &Identifier) -> Result<PersistedDocument> {
+        let doc_path = self.document_path_for(document_id);
+        if doc_path.exists() {
+            let doc_data = fs::read_to_string(doc_path).await?;
+            let doc: PersistedDocument = serde_json::from_str(&doc_data)?;
+            doc.delta.validate_quill(DEFAULT_QUILL_EMBEDS)?;
+            if !doc.delta.is_document() || !doc.delta.ends_with_newline() {
+                bail!("Persisted Delta is not a valid Quill document");
+            }
+            Ok(doc)
         } else {
             bail!("Document not found");
         }
     }
 
-    /// Store the text of a document in the database.
+    /// Store a Delta document in the database.
     pub async fn store_document(
         &self,
         document_id: &Identifier,
         document: &PersistedDocument,
     ) -> Result<()> {
         let path = self.document_path_for(document_id);
-        let meta_path = self.document_meta_path_for(document_id);
         let document = document.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            std::fs::write(path, &document.text).context("Failed to write document")?;
-            std::fs::write(meta_path, serde_json::to_string_pretty(&document.meta)?)
-                .context("Failed to write meta")?;
+            std::fs::write(path, serde_json::to_string_pretty(&document)?)
+                .context("Failed to write document")?;
             Ok(())
         })
         .await??;
@@ -168,11 +171,10 @@ impl Database {
         Ok(())
     }
 
-    fn document_meta_path_for(&self, document_id: &Identifier) -> PathBuf {
-        self.document_path_for(document_id).with_extension("json")
-    }
     fn document_path_for(&self, document_id: &Identifier) -> PathBuf {
-        self.document_path().join(document_id.as_ref())
+        self.document_path()
+            .join(document_id.as_ref())
+            .with_extension("json")
     }
     fn document_path(&self) -> PathBuf {
         self.storage.join("docs")

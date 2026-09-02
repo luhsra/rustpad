@@ -1,3 +1,80 @@
+@import "quill/dist/quill.snow.css";
+
 body {
   overscroll-behavior: none;
+}
+
+.editor-shell {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.editor-shell > .ql-toolbar {
+  flex: 0 0 auto;
+}
+
+.editor-shell > .ql-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.ql-editor {
+  font-size: 14px;
+  overflow-y: auto;
+}
+
+[data-theme="dark"] .ql-toolbar,
+[data-theme="dark"] .ql-container {
+  border-color: #3f3f46;
+}
+
+[data-theme="dark"] .ql-container,
+[data-theme="dark"] .ql-editor {
+  background: #18181b;
+  color: #f4f4f5;
+}
+
+[data-theme="dark"] .ql-snow .ql-stroke {
+  stroke: #d4d4d8;
+}
+
+[data-theme="dark"] .ql-snow .ql-fill {
+  fill: #d4d4d8;
+}
+
+[data-theme="dark"] .ql-snow .ql-picker {
+  color: #d4d4d8;
+}
+
+.remote-overlays {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: absolute;
+  z-index: 10;
+}
+
+.remote-cursor,
+.remote-selection {
+  position: absolute;
+}
+
+.remote-cursor {
+  border-left: 2px solid;
+  width: 0;
+}
+
+.remote-cursor::before {
+  background: inherit;
+  color: white;
+  content: attr(data-name);
+  font-size: 10px;
+  left: -2px;
+  padding: 1px 3px;
+  position: absolute;
+  top: -14px;
+  white-space: nowrap;
 }

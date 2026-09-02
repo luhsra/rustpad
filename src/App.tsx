@@ -1,32 +1,33 @@
 import { Box, Flex, Portal, Text } from "@chakra-ui/react";
-import { editor, languages } from "monaco-editor";
+import Quill from "quill";
 import { useEffect, useRef, useState } from "react";
 import useLocalStorageState from "use-local-storage-state";
-
-// Configure monaco before using it
-import "./monaco-config";
 
 import readme from "../README.md";
 import Footer from "./Footer";
 import Header from "./Header";
 import animals from "./animals.json";
 import { useColorMode } from "./components/color-mode";
-import Rustpad, { type OnlineUser, type UserRole, type Visibility } from "./rustpad";
 import { Toaster, toaster } from "./components/toaster";
+import Rustpad, {
+  type OnlineUser,
+  type UserRole,
+  type Visibility,
+} from "./rustpad";
 import useHash from "./useHash";
-import { Editor } from "@monaco-editor/react";
 
 export type ConnectionState = "connected" | "disconnected" | "desynchronized";
 
-const sampleText = typeof Bun !== "undefined"
-  ? await Bun.file(readme as any).text()
-  : await fetch(readme as any).then((response) => response.text());
+const sampleText =
+  typeof Bun !== "undefined"
+    ? await Bun.file(readme as any).text()
+    : await fetch(readme as any).then((response) => response.text());
 
 const VERSION = "dev";
 
 function getWsUri(id: string) {
-  let url = new URL(`api/socket/${id}`, window.location.href);
-  url.protocol = url.protocol == "https:" ? "wss:" : "ws:";
+  const url = new URL(`api/socket/${id}`, window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
 }
 
@@ -39,7 +40,6 @@ function generateHue() {
 }
 
 function App() {
-  const [language, setLanguage] = useState("markdown");
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [users, setUsers] = useState<Record<number, OnlineUser>>({});
   const [name, setName] = useLocalStorageState("name", {
@@ -49,127 +49,114 @@ function App() {
     defaultValue: generateHue,
   });
   const [role, setRole] = useState<UserRole>("anon");
-  const [editor, setEditor] = useState<editor.IStandaloneCodeEditor>();
+  const [editor, setEditor] = useState<Quill>();
   const [visibility, setVisibility] = useState<Visibility>("public");
-  const { colorMode, setColorMode, toggleColorMode } = useColorMode();
+  const editorElement = useRef<HTMLDivElement>(null);
   const rustpad = useRef<Rustpad | undefined>(undefined);
+  const { colorMode, setColorMode, toggleColorMode } = useColorMode();
   const id = useHash();
 
   useEffect(() => {
-    setColorMode(
-      window.matchMedia("(prefers-color-scheme: dark)").matches
-        ? "dark"
-        : "light",
-    );
-    // Add listener to update styles
-    window
-      .matchMedia("(prefers-color-scheme: dark)")
-      .addEventListener("change", (e) =>
-        setColorMode(e.matches ? "dark" : "light"),
-      );
-    // Remove listener
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateColorMode = (event: MediaQueryListEvent | MediaQueryList) =>
+      setColorMode(event.matches ? "dark" : "light");
+    updateColorMode(media);
+    media.addEventListener("change", updateColorMode);
+    return () => media.removeEventListener("change", updateColorMode);
+  }, [setColorMode]);
+
+  useEffect(() => {
+    if (!editorElement.current) return;
+    const quill = new Quill(editorElement.current, {
+      theme: "snow",
+      modules: {
+        history: { userOnly: true },
+        toolbar: [
+          [{ header: [1, 2, 3, false] }],
+          ["bold", "italic", "underline", "strike"],
+          [{ list: "ordered" }, { list: "bullet" }],
+          ["blockquote", "code-block", "link"],
+          ["clean"],
+        ],
+      },
+    });
+    setEditor(quill);
     return () => {
-      window
-        .matchMedia("(prefers-color-scheme: dark)")
-        .removeEventListener("change", () => { });
+      const toolbar = quill.getModule("toolbar") as { container: HTMLElement };
+      toolbar.container.remove();
+      quill.container.replaceChildren();
+      quill.container.removeAttribute("class");
+      setEditor(undefined);
     };
   }, []);
 
   useEffect(() => {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      model.setValue("");
-      model.setEOL(0); // LF
-      rustpad.current = new Rustpad({
-        uri: getWsUri(id),
-        editor,
-        onConnected: (info) => {
-          console.info("Connected to Rustpad server", info);
-          if (info) {
-            setName(info.name);
-            setRole(info.role);
-            setHue(info.hue);
-          }
-          setConnection("connected");
-        },
-        onDisconnected: () => setConnection("disconnected"),
-        onDesynchronized: () => {
-          setConnection("desynchronized");
-          toaster.create({
-            title: "Desynchronized with server",
-            description: "Please save your work and refresh the page.",
-            type: "error",
-            duration: undefined,
-            closable: true,
-          });
-        },
-        onError: (error) => {
-          setConnection("disconnected");
-          toaster.create({
-            title: "Cannot open document",
-            description: "The name can only contain letters, numbers, hyphens and underscores.",
-            type: "error",
-            duration: undefined,
-            closable: true,
-          });
-        },
-        onChangeMeta: (language, visibility) => {
-          if (languages.getLanguages().some((it) => it.id === language)) {
-            setLanguage(language);
-          }
-          setVisibility(visibility);
-        },
-        onChangeUsers: setUsers,
-        onChangeMe: (info) => {
+    if (!editor) return;
+    editor.setText("", "silent");
+    const history = editor.getModule("history") as { clear: () => void };
+    history.clear();
+    rustpad.current = new Rustpad({
+      uri: getWsUri(id),
+      editor,
+      onConnected: (info) => {
+        if (info) {
           setName(info.name);
           setRole(info.role);
           setHue(info.hue);
         }
-      });
-      return () => {
-        rustpad.current?.dispose();
-        rustpad.current = undefined;
-      };
-    }
-  }, [id, editor, toaster, setUsers]);
+        setConnection("connected");
+      },
+      onDisconnected: () => setConnection("disconnected"),
+      onDesynchronized: () => {
+        setConnection("desynchronized");
+        toaster.create({
+          title: "Desynchronized with server",
+          description: "Please save your work and refresh the page.",
+          type: "error",
+          duration: undefined,
+          closable: true,
+        });
+      },
+      onError: () => {
+        setConnection("disconnected");
+        toaster.create({
+          title: "Cannot open document",
+          description:
+            "The name can only contain letters, numbers, hyphens and underscores.",
+          type: "error",
+          duration: undefined,
+          closable: true,
+        });
+      },
+      onChangeMeta: setVisibility,
+      onChangeUsers: setUsers,
+      onChangeMe: (info) => {
+        setName(info.name);
+        setRole(info.role);
+        setHue(info.hue);
+      },
+    });
+    return () => {
+      rustpad.current?.dispose();
+      rustpad.current = undefined;
+    };
+  }, [editor, id, setHue, setName]);
 
   useEffect(() => {
-    if (connection === "connected") {
+    if (connection === "connected")
       rustpad.current?.setInfo({ name, hue, role });
-    }
-  }, [connection, name, hue, role]);
+  }, [connection, hue, name, role]);
 
-  function handleLanguageChange(language: string) {
-    setLanguage(language);
-    if (rustpad.current?.setMeta(language)) {
-      toaster.create({
-        title: "Language updated",
-        description: (
-          <>
-            All users are now editing in{" "}
-            <Text as="span" fontWeight="semibold">
-              {language}
-            </Text>
-            .
-          </>
-        ),
-        type: "info",
-        duration: 2000,
-        closable: true,
-      });
-    }
-  }
-
-  function handleVisibilityChange(visibility: Visibility) {
-    setVisibility(visibility);
-    if (rustpad.current?.setMeta(undefined, visibility)) {
+  function handleVisibilityChange(nextVisibility: Visibility) {
+    setVisibility(nextVisibility);
+    if (rustpad.current?.setVisibility(nextVisibility)) {
       toaster.create({
         title: "Visibility updated",
         description: (
           <>
             The document is now{" "}
             <Text as="span" fontWeight="semibold">
-              {visibility}
+              {nextVisibility}
             </Text>
             .
           </>
@@ -182,50 +169,28 @@ function App() {
   }
 
   function handleLoadSample() {
-    if (editor?.getModel()) {
-      const model = editor.getModel()!;
-      const range = model.getFullModelRange();
-
-      model.pushEditOperations(
-        editor.getSelections(),
-        [{ range, text: sampleText }],
-        () => null,
-      );
-      editor.setPosition({ column: 0, lineNumber: 0 });
-      if (language !== "markdown") {
-        handleLanguageChange("markdown");
-      }
-    }
+    if (!editor) return;
+    editor.setText(sampleText, "user");
+    editor.setSelection(0, 0, "silent");
   }
 
   return (
-    <Flex direction="column" h="100vh" overflow="hidden">
+    <Flex direction="column" h="100vh" overflow="hidden" data-theme={colorMode}>
       <Header
         toggleColorMode={toggleColorMode}
         version={VERSION}
         connection={connection}
       />
-      <Box flex="1 0" minH={0}>
-        <Editor
-          theme={colorMode === "dark" ? "vs-dark" : "vs"}
-          language={language}
-          options={{
-            automaticLayout: true,
-            fontSize: 13,
-            minimap: { enabled: false },
-          }}
-          onMount={(editor) => setEditor(editor)}
-        />
+      <Box flex="1 1 auto" minH={0} className="editor-shell">
+        <Box ref={editorElement} />
       </Box>
       <Footer
-        language={language}
         visibility={visibility}
         currentUser={{ name, hue, role }}
         users={users}
         onSetVisibility={handleVisibilityChange}
-        onLanguageChange={handleLanguageChange}
         onLoadSample={handleLoadSample}
-        onChangeName={(name) => name.length > 0 && setName(name)}
+        onChangeName={(nextName) => nextName.length > 0 && setName(nextName)}
         onChangeColor={() => setHue(generateHue())}
       />
       <Portal>

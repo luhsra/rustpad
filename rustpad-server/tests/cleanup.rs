@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use common::*;
-use operational_transform::OperationSeq;
+
 use rustpad_server::{ServerState, server};
 use serde_json::json;
 use tokio::time;
@@ -26,12 +26,10 @@ async fn test_cleanup() -> Result<()> {
     assert_eq!(msg, json!({ "Identity": { "id": 0, "info": () } }));
     assert!(socket.recv().await?.get("Meta").is_some());
 
-    let mut operation = OperationSeq::default();
-    operation.insert("hello");
     let msg = json!({
         "Edit": {
             "revision": 0,
-            "operation": operation
+            "operation": { "ops": [{ "insert": "hello" }] }
         }
     });
     socket.send(&msg).await;

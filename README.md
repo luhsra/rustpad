@@ -16,14 +16,11 @@ completely self-hosted and fits in a tiny Docker image, no database required.
 </a>
 </p>
 
-The server is written in Rust using the
-[warp](https://github.com/seanmonstar/warp) web server framework and the
-[operational-transform](https://github.com/spebern/operational-transform-rs)
-library. We use [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) to
-compile text operation logic to WebAssembly code, which runs in the browser. The
-frontend is written in TypeScript using [React](https://reactjs.org/) and
-interfaces with [Monaco](https://github.com/microsoft/monaco-editor), the text
-editor that powers VS Code.
+The server is written in Rust using [Axum](https://github.com/tokio-rs/axum)
+and implements Quill's Delta format and operational transformation algorithm.
+The frontend is written in TypeScript using [React](https://reactjs.org/) and
+[Quill](https://quilljs.com/). Delta documents are used directly by the editor,
+over WebSocket, and for persistence.
 
 Architecturally, client-side code communicates via WebSocket with a central
 server that stores in-memory data structures. This makes the editor very fast,
@@ -33,15 +30,8 @@ after 24 hours of inactivity.
 
 ## Development setup
 
-To run this application, you need to install Rust, `wasm-pack`, and `bun`.
-Then, build the WebAssembly portion of the app:
-
-```
-wasm-pack build rustpad-wasm
-```
-
-When that is complete, you can install dependencies for the frontend React
-application:
+To run this application, install Rust and `bun`, then install the frontend
+dependencies:
 
 ```
 bun install
@@ -65,12 +55,7 @@ reloading on changes.
 
 ## Testing
 
-To run integration tests for the server, use the standard `cargo test` command.
-For the WebAssembly component, you can run tests in a headless browser with
-
-```
-wasm-pack test --chrome --headless rustpad-wasm
-```
+Run server tests with `cargo test` and check the frontend with `bun run check`.
 
 ## Configuration
 
