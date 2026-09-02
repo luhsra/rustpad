@@ -23,10 +23,9 @@ The frontend is written in TypeScript using [React](https://reactjs.org/) and
 over WebSocket, and for persistence.
 
 Architecturally, client-side code communicates via WebSocket with a central
-server that stores in-memory data structures. This makes the editor very fast,
-allows us to avoid provisioning a database, and makes testing much easier. The
-tradeoff is that documents are transient and lost between server restarts, or
-after 24 hours of inactivity.
+server that keeps active documents in memory and persists document and user data
+as JSON files on disk. Inactive documents are removed from memory after 24 hours
+and are reloaded from storage when accessed again.
 
 ## Development setup
 
@@ -50,8 +49,9 @@ to start the frontend portion.
 bun run dev
 ```
 
-This command will open a browser window to `http://localhost:5173`, with hot
-reloading on changes.
+Open `http://localhost:5173` for the development frontend, which proxies API
+and WebSocket requests to the backend at `localhost:3030`. Bun reloads the
+frontend when files change.
 
 ## Testing
 
@@ -59,23 +59,24 @@ Run server tests with `cargo test` and check the frontend with `bun run check`.
 
 ## Configuration
 
-Although the default behavior of Rustpad is to store documents solely in memory
-and collect garbage after 24 hours of inactivity, this can be configured by
-setting the appropriate variables. The application server looks for the
-following environment variables on startup:
+The server accepts the following command-line options:
 
-- `EXPIRY_DAYS`: An integer corresponding to the number of days that inactive
-  documents are kept in memory before being garbage collected by the server
-  (default 1 day).
-- `SQLITE_URI`: A SQLite connection string used for persistence. If provided,
-  Rustpad will snapshot document contents to a local file, which enables them to
-  be retained between server restarts and after their in-memory data structures
-  expire. (When deploying a Docker container, this should point to the path of a
-  mounted volume.)
-- `PORT`: Which local port to listen for HTTP connections on (defaults to 3030).
-- `RUST_LOG`: Directives that control application logging, see the
-  [env_logger](https://docs.rs/env_logger/#enabling-logging) docs for more
-  information.
+- `--host <ADDRESS>`: Bind address, defaulting to `0.0.0.0:3030`.
+- `--storage <PATH>`: Directory for persisted document and user JSON files,
+  defaulting to `storage`.
+- `--auth <PATH>`: Optional path to an OpenID Connect configuration JSON file.
+  When omitted, authentication is disabled.
+
+For example:
+
+```sh
+cargo run -- --host 127.0.0.1:3030 --storage ./storage
+```
+
+An authentication configuration contains `client_id`, `client_secret`,
+`issuer_url`, `host_url`, and `admin_group`. Keep this file outside version
+control and pass its path with `--auth`. Set `RUST_LOG` to configure tracing
+output.
 
 ## Deployment
 
