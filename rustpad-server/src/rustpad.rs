@@ -126,15 +126,12 @@ impl Rustpad {
         info!("initializing connection id={id}");
 
         let mut messages = Vec::new();
-        messages.push(
-            ServerMsg::Identity {
-                id: id,
-                info: user.map(|u| u.into()),
-            }
-            .into(),
-        );
+        messages.push(ServerMsg::Identity {
+            id,
+            info: user.map(|u| u.into()),
+        });
         let state = self.state.read().await;
-        messages.push(ServerMsg::Meta(state.meta.clone()).into());
+        messages.push(ServerMsg::Meta(state.meta.clone()));
         if !state.operations.is_empty() {
             messages.push(ServerMsg::History {
                 start: 0,
@@ -178,7 +175,7 @@ impl Rustpad {
 
     pub async fn visibility(&self) -> Visibility {
         let state = self.state.read().await;
-        state.meta.visibility.clone()
+        state.meta.visibility
     }
 
     /// Returns a snapshot of the current document for persistence.

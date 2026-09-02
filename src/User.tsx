@@ -23,12 +23,12 @@ const icons = {
   admin: VscVerifiedFilled,
   user: VscVerified,
   anon: VscUnverified,
-}
+};
 
 export function User({ info }: UserProps) {
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
   const icon = icons[info.role];
-  const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
+  const name = info.role !== "anon" ? info.name : "Anon " + info.name;
 
   return (
     <HStack gap={2}>
@@ -45,7 +45,7 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
   const nameColor = `hsl(${info.hue}, 90%, 75%)`;
 
   const icon = icons[info.role];
-  const name = info.role !== "anon" ? info.name : ("Anon " + info.name);
+  const name = info.role !== "anon" ? info.name : "Anon " + info.name;
 
   const query = new URLSearchParams({ redirect: location.hash.slice(1) });
   const login_url = "/auth/login?" + query.toString();
@@ -79,11 +79,23 @@ function UserMe({ info, onChangeName, onChangeColor }: UserProps) {
                 <FaPalette /> Change Color
               </Button>
               {info.role !== "anon" ? (
-                <Button mt={2} size="sm" w="100%" colorPalette="red" onClick={() => (location.href = logout_url)}>
+                <Button
+                  mt={2}
+                  size="sm"
+                  w="100%"
+                  colorPalette="red"
+                  onClick={() => (location.href = logout_url)}
+                >
                   Logout
                 </Button>
               ) : (
-                <Button mt={2} size="sm" w="100%" colorPalette="green" onClick={() => (location.href = login_url)}>
+                <Button
+                  mt={2}
+                  size="sm"
+                  w="100%"
+                  colorPalette="green"
+                  onClick={() => (location.href = login_url)}
+                >
                   Login
                 </Button>
               )}

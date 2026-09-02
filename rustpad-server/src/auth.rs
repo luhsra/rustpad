@@ -377,7 +377,7 @@ fn redirect_to_id(redirect: &Option<Identifier>) -> impl IntoResponse {
     let redirect_url = if let Some(redirect) = redirect {
         format!("/#{redirect}")
     } else {
-        format!("/")
+        "/".to_string()
     };
     Html(format!(
         r#"
