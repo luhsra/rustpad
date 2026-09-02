@@ -9,6 +9,7 @@ import Header from "./Header";
 import animals from "./animals.json";
 import { useColorMode } from "./components/color-mode";
 import { Toaster, toaster } from "./components/toaster";
+import { headerAutofill, pasteMarkdown } from "./markdown";
 import Rustpad, {
   type OnlineUser,
   type UserRole,
@@ -52,6 +53,7 @@ function App() {
   const [editor, setEditor] = useState<Quill>();
   const [visibility, setVisibility] = useState<Visibility>("public");
   const editorElement = useRef<HTMLDivElement>(null);
+  const toolbarElement = useRef<HTMLDivElement>(null);
   const rustpad = useRef<Rustpad | undefined>(undefined);
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
   const id = useHash();
@@ -66,24 +68,27 @@ function App() {
   }, [setColorMode]);
 
   useEffect(() => {
-    if (!editorElement.current) return;
+    if (!editorElement.current || !toolbarElement.current) return;
     const quill = new Quill(editorElement.current, {
       theme: "snow",
       modules: {
         history: { userOnly: true },
-        toolbar: [
-          [{ header: [1, 2, 3, false] }],
-          ["bold", "italic", "underline", "strike"],
-          [{ list: "ordered" }, { list: "bullet" }],
-          ["blockquote", "code-block", "link"],
-          ["clean"],
-        ],
+        keyboard: {
+          bindings: {
+            "header autofill": headerAutofill,
+          },
+        },
+        toolbar: toolbarElement.current,
       },
     });
+    const handleMarkdownPaste = (event: ClipboardEvent) =>
+      pasteMarkdown(event, quill);
+    quill.root.addEventListener("paste", handleMarkdownPaste, true);
     setEditor(quill);
     return () => {
+      quill.root.removeEventListener("paste", handleMarkdownPaste, true);
       const toolbar = quill.getModule("toolbar") as { container: HTMLElement };
-      toolbar.container.remove();
+      toolbar.container.classList.remove("ql-toolbar", "ql-snow");
       quill.container.replaceChildren();
       quill.container.removeAttribute("class");
       setEditor(undefined);
@@ -180,6 +185,7 @@ function App() {
         toggleColorMode={toggleColorMode}
         version={VERSION}
         connection={connection}
+        toolbarElement={toolbarElement}
       />
       <Box flex="1 1 auto" minH={0} className="editor-shell">
         <Box ref={editorElement} />

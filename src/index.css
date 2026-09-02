@@ -10,8 +10,10 @@ body {
   position: relative;
 }
 
-.editor-shell > .ql-toolbar {
-  flex: 0 0 auto;
+.srapad-editor-toolbar.ql-toolbar {
+  border: 0;
+  padding: 0;
+  white-space: nowrap;
 }
 
 .editor-shell > .ql-container {
@@ -49,6 +51,12 @@ body {
   color: #d4d4d8;
 }
 
+[data-theme="dark"] .ql-snow .ql-picker.ql-expanded .ql-picker-options {
+  background: #27272a;
+  border-color: #3f3f46;
+  color: #f4f4f5;
+}
+
 .remote-overlays {
   inset: 0;
   overflow: hidden;
@@ -77,4 +85,31 @@ body {
   position: absolute;
   top: -14px;
   white-space: nowrap;
+}
+
+h1 {
+  font-size: 2em;
+  font-weight: bold;
+}
+h2 {
+  font-size: 1.6em;
+  font-weight: bold;
+}
+h3 {
+  font-size: 1.4em;
+  font-weight: bold;
+}
+h4 {
+  font-size: 1.2em;
+  font-weight: bold;
+}
+h5 {
+  font-weight: bold;
+}
+h6 {
+  font-size: 0.8em;
+  font-style: italic;
+}
+em {
+  font-style: italic;
 }
