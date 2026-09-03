@@ -3,13 +3,12 @@ import Quill from "quill";
 import { useEffect, useRef, useState } from "react";
 import useLocalStorageState from "use-local-storage-state";
 
-import readme from "../README.md";
 import Footer from "./Footer";
 import Header from "./Header";
 import animals from "./animals.json";
+import Editor from "./components/Editor";
 import { useColorMode } from "./components/color-mode";
 import { Toaster, toaster } from "./components/toaster";
-import { headerAutofill, pasteMarkdown } from "./markdown";
 import Rustpad, {
   type OnlineUser,
   type UserRole,
@@ -18,11 +17,6 @@ import Rustpad, {
 import useHash from "./useHash";
 
 export type ConnectionState = "connected" | "disconnected" | "desynchronized";
-
-const sampleText =
-  typeof Bun !== "undefined"
-    ? await Bun.file(readme as any).text()
-    : await fetch(readme as any).then((response) => response.text());
 
 const VERSION = "dev";
 
@@ -50,10 +44,8 @@ function App() {
     defaultValue: generateHue,
   });
   const [role, setRole] = useState<UserRole>("anon");
-  const [editor, setEditor] = useState<Quill>();
+  const editor = useRef<Quill>(null);
   const [visibility, setVisibility] = useState<Visibility>("public");
-  const editorElement = useRef<HTMLDivElement>(null);
-  const toolbarElement = useRef<HTMLDivElement>(null);
   const rustpad = useRef<Rustpad | undefined>(undefined);
   const { colorMode, setColorMode, toggleColorMode } = useColorMode();
   const id = useHash();
@@ -68,41 +60,15 @@ function App() {
   }, [setColorMode]);
 
   useEffect(() => {
-    if (!editorElement.current || !toolbarElement.current) return;
-    const quill = new Quill(editorElement.current, {
-      theme: "snow",
-      modules: {
-        history: { userOnly: true },
-        keyboard: {
-          bindings: {
-            "header autofill": headerAutofill,
-          },
-        },
-        toolbar: toolbarElement.current,
-      },
-    });
-    const handleMarkdownPaste = (event: ClipboardEvent) =>
-      pasteMarkdown(event, quill);
-    quill.root.addEventListener("paste", handleMarkdownPaste, true);
-    setEditor(quill);
-    return () => {
-      quill.root.removeEventListener("paste", handleMarkdownPaste, true);
-      const toolbar = quill.getModule("toolbar") as { container: HTMLElement };
-      toolbar.container.classList.remove("ql-toolbar", "ql-snow");
-      quill.container.replaceChildren();
-      quill.container.removeAttribute("class");
-      setEditor(undefined);
+    if (!editor.current) return;
+    editor.current.setText("", "silent");
+    const history = editor.current.getModule("history") as {
+      clear: () => void;
     };
-  }, []);
-
-  useEffect(() => {
-    if (!editor) return;
-    editor.setText("", "silent");
-    const history = editor.getModule("history") as { clear: () => void };
     history.clear();
     rustpad.current = new Rustpad({
       uri: getWsUri(id),
-      editor,
+      editor: editor.current,
       onConnected: (info) => {
         if (info) {
           setName(info.name);
@@ -173,29 +139,21 @@ function App() {
     }
   }
 
-  function handleLoadSample() {
-    if (!editor) return;
-    editor.setText(sampleText, "user");
-    editor.setSelection(0, 0, "silent");
-  }
-
   return (
     <Flex direction="column" h="100vh" overflow="hidden" data-theme={colorMode}>
       <Header
         toggleColorMode={toggleColorMode}
         version={VERSION}
         connection={connection}
-        toolbarElement={toolbarElement}
       />
       <Box flex="1 1 auto" minH={0} className="editor-shell">
-        <Box ref={editorElement} />
+        <Editor ref={editor} />
       </Box>
       <Footer
         visibility={visibility}
         currentUser={{ name, hue, role }}
         users={users}
         onSetVisibility={handleVisibilityChange}
-        onLoadSample={handleLoadSample}
         onChangeName={(nextName) => nextName.length > 0 && setName(nextName)}
         onChangeColor={() => setHue(generateHue())}
       />

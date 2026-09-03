@@ -20,7 +20,6 @@ export type FooterProps = {
   visibility: Visibility;
   onSetVisibility: (visibility: Visibility) => void;
 
-  onLoadSample: () => void;
   onChangeName: (name: string) => void;
   onChangeColor: () => void;
 };
@@ -31,7 +30,6 @@ function Footer({
   visibility,
   onSetVisibility,
 
-  onLoadSample,
   onChangeName,
   onChangeColor,
 }: FooterProps) {
@@ -72,11 +70,6 @@ function Footer({
                     {option}
                   </Button>
                 ))}
-
-                <Text>Delete this document and load the example code?</Text>
-                <Button mt={4} onClick={onLoadSample}>
-                  Load Sample
-                </Button>
               </Dialog.Body>
               <Dialog.Footer>
                 <Dialog.ActionTrigger asChild>
